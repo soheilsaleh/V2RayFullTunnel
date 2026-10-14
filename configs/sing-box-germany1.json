@@ -1,0 +1,54 @@
+{
+  "log": { "level": "info" },
+  "dns": {
+    "servers": [
+      { "tag": "direct-dns", "type": "udp", "server": "223.5.5.5" }
+    ],
+    "rules": [],
+    "final": "direct-dns"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "v2-tun",
+      "address": [ "172.18.0.1/30" ],
+      "auto_route": true,
+      "strict_route": true,
+      "stack": "gvisor"
+    },
+    { "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 10808 }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "api.n3webhosting.com",
+      "server_port": 443,
+      "uuid": "fa7aa694-f2dd-473f-8c20-7f6523bc59ba",
+      "tls": {
+        "enabled": true,
+        "server_name": "api.n3webhosting.com",
+        "alpn": [ "http/1.1" ]
+      },
+      "bind_interface": "Ethernet0",
+      "transport": {
+        "type": "ws",
+        "path": "/api",
+        "headers": { "Host": "api.n3webhosting.com" }
+      }
+    },
+    { "type": "direct", "tag": "direct", "bind_interface": "Ethernet0" },
+    { "type": "block", "tag": "block" }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": { "server": "direct-dns" },
+    "rules": [
+      { "protocol": "dns", "action": "hijack-dns" },
+      { "ip_cidr": [ "223.5.5.5/32" ], "outbound": "direct" },
+      { "domain": [ "api.n3webhosting.com" ], "outbound": "direct" }
+    ],
+    "final": "proxy"
+  }
+}

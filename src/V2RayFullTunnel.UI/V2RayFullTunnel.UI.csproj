@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>V2RayFullTunnel</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\V2RayFullTunnel.Core\V2RayFullTunnel.Core.csproj" />
+    <ProjectReference Include="..\V2RayFullTunnel.Common\V2RayFullTunnel.Common.csproj" />
+    <ProjectReference Include="..\V2RayFullTunnel.Firewall\V2RayFullTunnel.Firewall.csproj" />
+  </ItemGroup>
+</Project>

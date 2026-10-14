@@ -1,0 +1,10 @@
+src/*/bin/
+src/*/obj/
+vendor/*.exe
+vendor/*.dll
+configs/sing-box-test.json
+scripts/killswitch-state.json
+*.user
+.vs/
+.dotnet/
+sing-box.json

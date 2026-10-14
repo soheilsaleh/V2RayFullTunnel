@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <!-- Hosting/Logging/DI از فریم‌ورک مشترک همراه SDK (بدون نیاز به NuGet) -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <!-- TODO(phase5): Microsoft.Extensions.Hosting.WindowsServices (نیاز به دسترسی NuGet) -->
+  <ItemGroup>
+    <ProjectReference Include="..\V2RayFullTunnel.Core\V2RayFullTunnel.Core.csproj" />
+    <ProjectReference Include="..\V2RayFullTunnel.Firewall\V2RayFullTunnel.Firewall.csproj" />
+  </ItemGroup>
+</Project>
