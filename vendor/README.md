@@ -1,4 +1,12 @@
-# vendor: فایل‌های باینری اینجا قرار می‌گیرند (در گیت کامیت نشوند)
-# sing-box.exe نسخه 1.14.3 هم‌اکنون موجود و با `sing-box check` تایید شده.
-# نکته: کانفیگ ما از stack ‏gvisor استفاده می‌کند، پس wintun.dll لازم نیست.
-# برای به‌روزرسانی: scripts/download-singbox.ps1 را با PowerShell اجرا کن.
+# vendor
+
+Binary files in this directory are **not** committed to the repository
+(see `vendor/*.exe` and `vendor/*.dll` in `.gitignore`).
+
+`sing-box.exe` (v1.14.3) is downloaded here by `scripts/download-singbox.ps1`.
+
+The Wintun TUN driver is embedded inside the sing-box binary, so a separate
+`wintun.dll` is not required.
+
+See the repository's `THIRD_PARTY_NOTICES.md` for the licenses that apply to these
+binaries.
