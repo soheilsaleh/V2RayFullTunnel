@@ -8,3 +8,4 @@ scripts/killswitch-state.json
 .vs/
 .dotnet/
 sing-box.json
+.idea
