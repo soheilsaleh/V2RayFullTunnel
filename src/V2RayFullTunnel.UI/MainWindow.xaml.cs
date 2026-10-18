@@ -23,13 +23,27 @@ public partial class MainWindow : Window
     private bool _updatingProfile;
     private bool _reallyExit;
 
+    // لاگ‌ها در صف جمع می‌شوند و حداکثر ~۸ بار در ثانیه روی UI خالی می‌شوند.
+    // قبلاً هر خط با Dispatcher.Invoke همگام نوشته می‌شد و هنگام سیل لاگ رابط را قفل می‌کرد.
+    private readonly Queue<string> _logQueue = new();
+    private readonly object _logLock = new();
+    private readonly System.Windows.Threading.DispatcherTimer _logTimer;
+    private int _logLines;
+
     public MainWindow()
     {
         InitializeComponent();
 
         _tunnel.Log += Log;
         _tunnel.StateChanged += (state, message) =>
-            Dispatcher.Invoke(() => ApplyState(state, message));
+            Dispatcher.BeginInvoke(() => ApplyState(state, message));
+
+        _logTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(120)
+        };
+        _logTimer.Tick += (_, _) => FlushLog();
+        _logTimer.Start();
 
         InitTray();
         RefreshProfiles(StartupSelection());
@@ -305,13 +319,15 @@ public partial class MainWindow : Window
     private void ApplyState(TunnelState state, string message)
     {
         StatusTitle.Text = message;
-        StatusDot.Background = new SolidColorBrush(state switch
+        var accent = new SolidColorBrush(state switch
         {
             TunnelState.Connected => Color.FromRgb(0x2E, 0x9E, 0x5B),
             TunnelState.Connecting => Color.FromRgb(0xE0, 0xA1, 0x2E),
             TunnelState.Failed => Color.FromRgb(0xC0, 0x39, 0x2B),
             _ => Color.FromRgb(0xC3, 0xC9, 0xD2)
         });
+        StatusDot.Background = accent;
+        StatusAccent.Background = accent;
         StatusSub.Text = state == TunnelState.Connected
             ? "KillSwitch is on: while the tunnel is down, no traffic can leave directly."
             : "Select a saved profile and press Connect.";
@@ -328,11 +344,29 @@ public partial class MainWindow : Window
 
     private void Log(string message)
     {
-        Dispatcher.Invoke(() =>
+        lock (_logLock) _logQueue.Enqueue($"[{DateTime.Now:HH:mm:ss}] {message}");
+    }
+
+    private void FlushLog()
+    {
+        string[] batch;
+        lock (_logLock)
         {
-            LogBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\n");
-            LogBox.ScrollToEnd();
-        });
+            if (_logQueue.Count == 0) return;
+            batch = _logQueue.ToArray();
+            _logQueue.Clear();
+        }
+        foreach (var line in batch) LogBox.AppendText(line + "\n");
+        _logLines += batch.Length;
+        // برای جلوگیری از کند شدن تدریجی، متن لاگ را هر چند هزار خط نصف می‌کنیم
+        if (_logLines > 2500)
+        {
+            string text = LogBox.Text;
+            int cut = text.IndexOf('\n', text.Length / 2);
+            if (cut > 0) LogBox.Text = text[(cut + 1)..];
+            _logLines = LogBox.LineCount;
+        }
+        LogBox.ScrollToEnd();
     }
 
     private void Warn(string message)

@@ -54,9 +54,11 @@ public sealed class TunnelManager : IDisposable
         if (IsConnected) throw new InvalidOperationException("Already connected.");
         Set(TunnelState.Connecting, "Connecting...");
 
-        // ترتیب حیاتی: اول رزولو و گیت‌وی، چون بعد از روشن شدن TUN دیگر در دسترس نیست
-        var gw = KillSwitch.GetDefaultGateway();
+        // ترتیب حیاتی: اول رزولو و گیت‌وی، چون بعد از روشن شدن TUN دیگر در دسترس نیست.
+        // گیت‌وی را از مسیر واقعیِ رسیدن به سرور می‌گیریم (نه کمترین متریک)، چون ویندوز ممکن است
+        // چند مسیر پیش‌فرض داشته باشد (VPN/Fortinet/OpenVPN/VMware) و کمترین متریک گمراه‌کننده باشد.
         string serverIp = KillSwitch.ResolveServerIp(link.Address);
+        var gw = KillSwitch.GetGatewayTo(serverIp);
         Write($"Server: {serverIp} | Gateway: {gw.InterfaceAlias} ({gw.NextHop})");
 
         if (!KillSwitch.CleanupTunnelResidue())
@@ -113,7 +115,7 @@ public sealed class TunnelManager : IDisposable
         // Connect بعدی با "create adapter: already exists" می‌میرد. پس همیشه تمیز می‌کنیم.
         try
         {
-            KillSwitch.Apply(serverIp, link.Port, _exePath);
+            KillSwitch.Apply(serverIp, gw, _exePath);
         }
         catch
         {
@@ -142,7 +144,7 @@ public sealed class TunnelManager : IDisposable
                     return true;
             }
             catch { }
-            Thread.Sleep(500);
+            Thread.Sleep(150);
         }
         return false;
     }

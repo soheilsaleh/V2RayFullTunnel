@@ -37,8 +37,11 @@ sealed class Worker(ILogger<Worker> log) : BackgroundService
                         _runner.OnExited += code => log.LogWarning("sing-box با کد {c} خارج شد؛ اینترنت در حالت Block می‌ماند.", code);
                         if (_runner.CheckConfig(out _))
                         {
+                            // گیت‌وی و IP سرور باید قبل از بالا آمدن TUN گرفته شوند.
+                            string serverIp = KillSwitch.ResolveServerIp(parts[0]);
+                            var gw = KillSwitch.GetGatewayTo(serverIp);
                             _runner.Start();
-                            KillSwitch.Apply(parts[0], int.Parse(parts[1]), ExePath);
+                            KillSwitch.Apply(serverIp, gw, ExePath);
                             log.LogInformation("تونل وصل + KillSwitch اعمال شد.");
                         }
                     }

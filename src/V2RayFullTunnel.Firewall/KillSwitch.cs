@@ -35,6 +35,51 @@ public static class KillSwitch
             r.GetProperty("InterfaceAlias").GetString() ?? "");
     }
 
+    /// <summary>
+    /// گیت‌وی/اینترفیس واقعی برای رسیدن به یک IP مشخص.
+    /// نکته‌ی حیاتی: گیتویی انتخاب می‌شود که «on-link» باشد (داخل سابنت همان اینترفیس)،
+    /// چون بعد از حذف مسیر پیش‌فرض فیزیکی، فقط گیتویِ on-link قابل دسترسی می‌ماند
+    /// (گیتوی‌های شبح مانند 10.232.118.45 بیرون سابنت، باعث «no route to internet» می‌شوند).
+    /// </summary>
+    public static DefaultGateway GetGatewayTo(string ip)
+    {
+        string script = @"
+$src = Find-NetRoute -RemoteIPAddress '" + ip + @"' -ErrorAction SilentlyContinue | Where-Object { $_.NextHop } | Select-Object -First 1
+if (-not $src) { exit 1 }
+$ifIdx = $src.InterfaceIndex
+$onlink = @(Get-NetRoute -InterfaceIndex $ifIdx -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -eq '0.0.0.0' -and $_.DestinationPrefix -ne '0.0.0.0/0' } | Select-Object -ExpandProperty DestinationPrefix)
+$defs = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $ifIdx -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '0.0.0.0' -and $_.NextHop -ne '127.0.0.1' } | Sort-Object RouteMetric)
+$best = $null
+foreach ($d in $defs) {
+    $gwb = [System.Net.IPAddress]::Parse($d.NextHop).GetAddressBytes()
+    foreach ($ol in $onlink) {
+        $parts = $ol.Split('/'); $nb = [System.Net.IPAddress]::Parse($parts[0]).GetAddressBytes(); $len = [int]$parts[1]
+        $ok = $true
+        for ($i = 0; $i -lt 4; $i++) {
+            $bits = [Math]::Min(8, [Math]::Max(0, $len - $i * 8))
+            if ($bits -le 0) { break }
+            $mask = if ($bits -ge 8) { 255 } else { 256 - [int][Math]::Pow(2, 8 - $bits) }
+            if (($gwb[$i] -band $mask) -ne ($nb[$i] -band $mask)) { $ok = $false; break }
+        }
+        if ($ok) { $best = $d; break }
+    }
+    if ($best) { break }
+}
+if (-not $best) { $best = $src }
+@{ NextHop = $best.NextHop; InterfaceIndex = $best.InterfaceIndex; InterfaceAlias = $best.InterfaceAlias } | ConvertTo-Json -Compress
+exit 0
+";
+        string json = Ps(script);
+        if (string.IsNullOrWhiteSpace(json) || json.Trim() == "null")
+            throw new InvalidOperationException($"مسیر رسیدن به {ip} پیدا نشد؛ اینترنت وصل نیست؟");
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var r = doc.RootElement;
+        return new DefaultGateway(
+            r.GetProperty("NextHop").GetString() ?? "",
+            r.GetProperty("InterfaceIndex").GetInt32(),
+            r.GetProperty("InterfaceAlias").GetString() ?? "");
+    }
+
     /// <summary>رزولو IP سرور با retry؛ حتماً قبل از روشن شدن TUN صدا بزن.</summary>
     public static string ResolveServerIp(string host)
     {
@@ -49,7 +94,7 @@ public static class KillSwitch
                 if (ip != null) return ip.ToString();
                 last = new InvalidOperationException("پاسخی برنگشت.");
             }
-            catch (Exception ex) { last = ex; System.Threading.Thread.Sleep(1000); }
+            catch (Exception ex) { last = ex; System.Threading.Thread.Sleep(300); }
             if (i == 2) throw new InvalidOperationException($"IP سرور {host} پیدا نشد: {last?.Message}");
         }
         throw new InvalidOperationException($"IP سرور {host} پیدا نشد.");
@@ -66,19 +111,26 @@ public static class KillSwitch
         try
         {
             if (System.Diagnostics.Process.GetProcessesByName("sing-box").Length > 0) return false;
+
+            // مسیر سریع: اگر بازمانده‌ای نیست، هیچ ثانیه‌ای تلف نشود (قبلاً همیشه ۱.۵ ثانیه می‌خوابید).
+            const string filter = "$_.Name -like 'v2-tun*' -or $_.InterfaceDescription -like '*Wintun*' -or $_.InterfaceDescription -like '*sing-tun*'";
+            string probe = Ps($"Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {{ {filter} }} | Select-Object Name | ConvertTo-Json -Compress; exit 0");
+            if (string.IsNullOrWhiteSpace(probe) || probe.Trim() == "null" || probe.Trim() == "[]")
+                return true;
+
             for (int i = 0; i < attempts; i++)
             {
-                System.Threading.Thread.Sleep(i == 0 ? 1500 : 2000); // آزاد شدن هندل درایور
+                System.Threading.Thread.Sleep(i == 0 ? 600 : 1500); // آزاد شدن هندل درایور
                 Ps("Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -like 'v2-tun*' } | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue; exit 0");
 
-                string json = Ps("Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'v2-tun*' -or $_.InterfaceDescription -like '*Wintun*' -or $_.InterfaceDescription -like '*sing-tun*' } | Select-Object Name | ConvertTo-Json -Compress; exit 0");
+                string json = Ps($"Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {{ {filter} }} | Select-Object Name | ConvertTo-Json -Compress; exit 0");
                 if (string.IsNullOrWhiteSpace(json) || json.Trim() == "null" || json.Trim() == "[]")
                     return true; // چیزی برای پاکسازی نمانده
 
-                Ps("Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'v2-tun*' -or $_.InterfaceDescription -like '*Wintun*' -or $_.InterfaceDescription -like '*sing-tun*' } | ForEach-Object { Disable-NetAdapter -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue }; exit 0");
-                System.Threading.Thread.Sleep(800);
-                Ps("Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'v2-tun*' -or $_.InterfaceDescription -like '*Wintun*' -or $_.InterfaceDescription -like '*sing-tun*' } | ForEach-Object { Remove-NetAdapter -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue }; exit 0");
-                System.Threading.Thread.Sleep(800);
+                Ps($"Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {{ {filter} }} | ForEach-Object {{ Disable-NetAdapter -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue }}; exit 0");
+                System.Threading.Thread.Sleep(400);
+                Ps($"Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {{ {filter} }} | ForEach-Object {{ Remove-NetAdapter -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue }}; exit 0");
+                System.Threading.Thread.Sleep(400);
                 // آخرین شانس: دستگاه شبح (Status=Unknown) فقط با حذف PnP پاک می‌شود.
                 // نام دستگاه ممکن است «sing-tun Tunnel» یا «Wintun» باشد، پس روی InstanceId هم فیلتر می‌کنیم.
                 Ps("Get-PnpDevice -Class Net -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -like '*Wintun*' -or $_.FriendlyName -like '*tun*Tunnel*' -or $_.InstanceId -like '*WINTUN*' } | ForEach-Object { pnputil /remove-device $_.InstanceId /subtree | Out-Null }; exit 0");
@@ -97,19 +149,16 @@ public static class KillSwitch
         Restore();
     }
 
-    public static void Apply(string serverHost, int serverPort, string coreExePath)
+    /// <param name="remoteIp">IP سروری که قبل از بالا آمدن TUN رزولو شده.</param>
+    /// <param name="gw">گیت‌وی/اینترفیسِ واقعیِ رسیدن به سرور، که باید قبل از بالا آمدن TUN گرفته شود
+    /// (بعد از روشن شدن TUN، مسیر سرور از داخل تونل است و دیگر قابل تشخیص نیست).</param>
+    public static void Apply(string remoteIp, DefaultGateway gw, string coreExePath)
     {
-        string remoteIp = ResolveServerIp(serverHost);
         Directory.CreateDirectory(DataDir);
         // حالت نیمه‌کاره از اجرای قبلی: مسیرهای ذخیره‌شده متعلق به خودمان است، پس
-        // به‌جای خطای «اول Restore بزن» خودمان برمی‌گردانیم و ادامه می‌دهیم.
-        if (File.Exists(StatePath))
-        {
-            Restore();
-            throw new InvalidOperationException("Stale network state from a previous run was restored. Please try Connect again.");
-        }
+        // خودمان برمی‌گردانیم و بلافاصله ادامه می‌دهیم (قبلاً خطا می‌داد و کاربر باید دوباره Connect می‌زد).
+        if (File.Exists(StatePath)) Restore();
 
-        var gw = GetDefaultGateway();
         var transcript = new List<string> { $"gw={gw.NextHop} if={gw.InterfaceAlias} server={remoteIp}" };
         string Run(string cmd)
         {
@@ -133,27 +182,32 @@ public static class KillSwitch
         var created = new List<string>();
         try
         {
-            // ۱. اول استثناها (idempotent)
+            // ۱. اول استثناها (idempotent) — همه در یک پروسه پاورشل تا سریع باشد
             // NOTE: حذف مسیر ناموجود حتی با SilentlyContinue کد خروج ۱ می‌دهد؛ پس exit 0 صریح.
-            Run($"Remove-NetRoute -DestinationPrefix '{remoteIp}/32' -Confirm:$false -ErrorAction SilentlyContinue; exit 0");
-            Run($"Remove-NetRoute -DestinationPrefix '{BootstrapDns}/32' -Confirm:$false -ErrorAction SilentlyContinue; exit 0");
-            Run($"New-NetRoute -DestinationPrefix '{remoteIp}/32' -NextHop '{gw.NextHop}' -InterfaceIndex {gw.InterfaceIndex} -RouteMetric 5 -Confirm:$false");
+            Run($@"$ErrorActionPreference='Continue';
+Remove-NetRoute -DestinationPrefix '{remoteIp}/32' -Confirm:$false -ErrorAction SilentlyContinue;
+Remove-NetRoute -DestinationPrefix '{BootstrapDns}/32' -Confirm:$false -ErrorAction SilentlyContinue;
+New-NetRoute -DestinationPrefix '{remoteIp}/32' -NextHop '{gw.NextHop}' -InterfaceIndex {gw.InterfaceIndex} -RouteMetric 5 -Confirm:$false;
+New-NetRoute -DestinationPrefix '{BootstrapDns}/32' -NextHop '{gw.NextHop}' -InterfaceIndex {gw.InterfaceIndex} -RouteMetric 5 -Confirm:$false;
+if (@(Get-NetRoute -DestinationPrefix '{remoteIp}/32' -ErrorAction SilentlyContinue).Count -eq 0) {{ exit 1 }}
+if (@(Get-NetRoute -DestinationPrefix '{BootstrapDns}/32' -ErrorAction SilentlyContinue).Count -eq 0) {{ exit 1 }}
+exit 0");
             created.Add(remoteIp + "/32");
-            Run($"New-NetRoute -DestinationPrefix '{BootstrapDns}/32' -NextHop '{gw.NextHop}' -InterfaceIndex {gw.InterfaceIndex} -RouteMetric 5 -Confirm:$false");
             created.Add(BootstrapDns + "/32");
-            Run($"if (@(Get-NetRoute -DestinationPrefix '{remoteIp}/32' -ErrorAction SilentlyContinue).Count -eq 0) {{ exit 1 }}");
-            Run($"if (@(Get-NetRoute -DestinationPrefix '{BootstrapDns}/32' -ErrorAction SilentlyContinue).Count -eq 0) {{ exit 1 }}");
 
             // ۲. بعد حذف defaultهای فیزیکی (نه TUN)
-            foreach (var r in v4)
+            // مقاوم: خطای «مسیر یافت نشد» نباید کل اتصال را خراب کند (چند مسیر پیش‌فرض روی ویندوز رایج است).
+            if (v4.Count > 0)
             {
-                Run($"Remove-NetRoute -DestinationPrefix '0.0.0.0/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -Confirm:$false");
-                removed.Add(("0.0.0.0/0", r));
+                Run("$ErrorActionPreference='Continue'; " + string.Join(" ", v4.Select(r =>
+                    $"Remove-NetRoute -DestinationPrefix '0.0.0.0/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -Confirm:$false -ErrorAction SilentlyContinue;")) + " exit 0");
+                foreach (var r in v4) removed.Add(("0.0.0.0/0", r));
             }
-            foreach (var r in v6)
+            if (v6.Count > 0)
             {
-                Run($"Remove-NetRoute -DestinationPrefix '::/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -Confirm:$false");
-                removed.Add(("::/0", r));
+                Run("$ErrorActionPreference='Continue'; " + string.Join(" ", v6.Select(r =>
+                    $"Remove-NetRoute -DestinationPrefix '::/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -Confirm:$false -ErrorAction SilentlyContinue;")) + " exit 0");
+                foreach (var r in v6) removed.Add(("::/0", r));
             }
 
             File.WriteAllText(StatePath, System.Text.Json.JsonSerializer.Serialize(new SavedState(v4, v6, remoteIp, BootstrapDns)));
@@ -176,24 +230,17 @@ public static class KillSwitch
             if (!File.Exists(StatePath)) return;
             var state = System.Text.Json.JsonSerializer.Deserialize<SavedState>(File.ReadAllText(StatePath))
                 ?? throw new InvalidOperationException("فایل حالت خراب است.");
-            Ps($"Remove-NetRoute -DestinationPrefix '{state.ServerIp}/32' -Confirm:$false -ErrorAction SilentlyContinue; exit 0");
+            // همه‌ی بازیابی در یک پروسه پاورشل (قبلاً هر مسیر ۲ پروسه و قطع‌وصل را کند می‌کرد).
+            var sb = new System.Text.StringBuilder("$ErrorActionPreference='Continue';");
+            sb.Append($"Remove-NetRoute -DestinationPrefix '{state.ServerIp}/32' -Confirm:$false -ErrorAction SilentlyContinue;");
             if (!string.IsNullOrEmpty(state.BootstrapIp))
-                Ps($"Remove-NetRoute -DestinationPrefix '{state.BootstrapIp}/32' -Confirm:$false -ErrorAction SilentlyContinue; exit 0");
+                sb.Append($"Remove-NetRoute -DestinationPrefix '{state.BootstrapIp}/32' -Confirm:$false -ErrorAction SilentlyContinue;");
             foreach (var r in state.V4.Where(x => !string.IsNullOrEmpty(x.NextHop) && x.InterfaceIndex > 0))
-            {
-                Ps($"Remove-NetRoute -DestinationPrefix '0.0.0.0/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -Confirm:$false -ErrorAction SilentlyContinue; exit 0");
-                // اگر همان مسیر از قبل هست (مثلاً DHCP برگردانده) دوباره نساز
-                string exists = Ps($"@(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object {{ $_.NextHop -eq '{r.NextHop}' -and $_.InterfaceIndex -eq {r.InterfaceIndex} }}).Count; exit 0");
-                if (exists.Trim() != "0") continue;
-                Ps($"New-NetRoute -DestinationPrefix '0.0.0.0/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -RouteMetric {r.RouteMetric} -Confirm:$false");
-            }
+                sb.Append($"if (-not (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object {{ $_.NextHop -eq '{r.NextHop}' -and $_.InterfaceIndex -eq {r.InterfaceIndex} }})) {{ New-NetRoute -DestinationPrefix '0.0.0.0/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -RouteMetric {r.RouteMetric} -Confirm:$false -ErrorAction SilentlyContinue }};");
             foreach (var r in state.V6.Where(x => !string.IsNullOrEmpty(x.NextHop) && x.InterfaceIndex > 0))
-            {
-                Ps($"Remove-NetRoute -DestinationPrefix '::/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -Confirm:$false -ErrorAction SilentlyContinue; exit 0");
-                string exists = Ps($"@(Get-NetRoute -DestinationPrefix '::/0' -ErrorAction SilentlyContinue | Where-Object {{ $_.NextHop -eq '{r.NextHop}' -and $_.InterfaceIndex -eq {r.InterfaceIndex} }}).Count; exit 0");
-                if (exists.Trim() != "0") continue;
-                Ps($"New-NetRoute -DestinationPrefix '::/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -RouteMetric {r.RouteMetric} -Confirm:$false");
-            }
+                sb.Append($"if (-not (Get-NetRoute -DestinationPrefix '::/0' -ErrorAction SilentlyContinue | Where-Object {{ $_.NextHop -eq '{r.NextHop}' -and $_.InterfaceIndex -eq {r.InterfaceIndex} }})) {{ New-NetRoute -DestinationPrefix '::/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -RouteMetric {r.RouteMetric} -Confirm:$false -ErrorAction SilentlyContinue }};");
+            sb.Append("exit 0");
+            Ps(sb.ToString());
             File.Delete(StatePath);
         }
         catch when (silent) { }

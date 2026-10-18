@@ -3,32 +3,94 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              StartupUri="MainWindow.xaml">
   <Application.Resources>
-    <!-- بدون قاب و گوشه‌گرد: دکمه‌ها روی کارت سفید تمیز دیده می‌شوند -->
+    <SolidColorBrush x:Key="B.AppBg" Color="#EDF0F5"/>
+    <SolidColorBrush x:Key="B.Card" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="B.Text" Color="#151B23"/>
+    <SolidColorBrush x:Key="B.Muted" Color="#66707E"/>
+    <SolidColorBrush x:Key="B.Faint" Color="#8A93A0"/>
+    <SolidColorBrush x:Key="B.Accent" Color="#2D6CDF"/>
+    <SolidColorBrush x:Key="B.AccentSoft" Color="#E8F1FF"/>
+    <SolidColorBrush x:Key="B.Border" Color="#DCE1E8"/>
+    <SolidColorBrush x:Key="B.Surface" Color="#F5F7FA"/>
+
+    <!-- کارت سفید تمیز با گوشه‌های نرم -->
+    <Style x:Key="Card" TargetType="Border">
+      <Setter Property="Background" Value="{StaticResource B.Card}"/>
+      <Setter Property="CornerRadius" Value="14"/>
+      <Setter Property="Padding" Value="16"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+    </Style>
+
+    <!-- دکمه تخت با انیمیشن نرم hover / press -->
     <Style x:Key="FlatButton" TargetType="Button">
       <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Padding" Value="10,7"/>
+      <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="8"
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="9"
                     Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Opacity" Value="0.88"/>
+                <Trigger.EnterActions>
+                  <BeginStoryboard>
+                    <Storyboard>
+                      <DoubleAnimation Storyboard.TargetName="Bd" Storyboard.TargetProperty="Opacity"
+                                       To="0.88" Duration="0:0:0.10"/>
+                    </Storyboard>
+                  </BeginStoryboard>
+                </Trigger.EnterActions>
+                <Trigger.ExitActions>
+                  <BeginStoryboard>
+                    <Storyboard>
+                      <DoubleAnimation Storyboard.TargetName="Bd" Storyboard.TargetProperty="Opacity"
+                                       To="1" Duration="0:0:0.16"/>
+                    </Storyboard>
+                  </BeginStoryboard>
+                </Trigger.ExitActions>
               </Trigger>
               <Trigger Property="IsPressed" Value="True">
                 <Setter TargetName="Bd" Property="Opacity" Value="0.72"/>
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
                 <Setter TargetName="Bd" Property="Opacity" Value="0.45"/>
+                <Setter Property="Cursor" Value="Arrow"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
+    </Style>
+
+    <!-- ورودی/متن با گوشه‌های نرم و هاله‌ی فوکوس -->
+    <Style x:Key="InputBox" TargetType="TextBox">
+      <Setter Property="Padding" Value="11,8"/>
       <Setter Property="FontSize" Value="13"/>
-      <Setter Property="Padding" Value="10,6"/>
+      <Setter Property="Foreground" Value="{StaticResource B.Text}"/>
+      <Setter Property="CaretBrush" Value="{StaticResource B.Text}"/>
+      <Setter Property="SelectionBrush" Value="{StaticResource B.Accent}"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border x:Name="Bd" Background="White" BorderBrush="{StaticResource B.Border}"
+                    BorderThickness="1" CornerRadius="9" SnapsToDevicePixels="True">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"
+                            VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource B.Accent}"/>
+                <Setter TargetName="Bd" Property="BorderThickness" Value="1.5"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
   </Application.Resources>
 </Application>
