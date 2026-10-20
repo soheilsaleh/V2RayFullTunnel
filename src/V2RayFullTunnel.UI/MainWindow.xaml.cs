@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -19,9 +20,15 @@ public partial class MainWindow : Window
     private readonly ProfileStore _store = new();
     private readonly TunnelManager _tunnel = new();
     private Forms.NotifyIcon? _tray;
+    private Forms.ToolStripMenuItem? _trayConnect;
+    private Forms.ToolStripMenuItem? _trayDisconnect;
+    private System.Drawing.Icon? _iconOff, _iconOn, _iconBusy, _iconError;
     private bool _syncingProfileList;
     private bool _updatingProfile;
     private bool _reallyExit;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyIcon(IntPtr hIcon);
 
     // لاگ‌ها در صف جمع می‌شوند و حداکثر ~۸ بار در ثانیه روی UI خالی می‌شوند.
     // قبلاً هر خط با Dispatcher.Invoke همگام نوشته می‌شد و هنگام سیل لاگ رابط را قفل می‌کرد.
@@ -70,22 +77,56 @@ public partial class MainWindow : Window
 
     private void InitTray()
     {
+        _iconOff = CreateStatusIcon(System.Drawing.Color.FromArgb(0x6B, 0x76, 0x84), "\u2013");
+        _iconBusy = CreateStatusIcon(System.Drawing.Color.FromArgb(0xE0, 0xA1, 0x2E), "\u2026");
+        _iconOn = CreateStatusIcon(System.Drawing.Color.FromArgb(0x2E, 0x9E, 0x5B), "\u2713");
+        _iconError = CreateStatusIcon(System.Drawing.Color.FromArgb(0xC0, 0x39, 0x2B), "!");
+
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("Show window", null, (_, _) => Dispatcher.Invoke(ShowWindow));
         menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add("Connect", null, (_, _) => Dispatcher.Invoke(() => ConnectFromTray()));
-        menu.Items.Add("Disconnect", null, (_, _) => Dispatcher.Invoke(() => DisconnectFromTray()));
+        _trayConnect = new Forms.ToolStripMenuItem("Connect", null, (_, _) => Dispatcher.Invoke(ConnectFromTray));
+        _trayDisconnect = new Forms.ToolStripMenuItem("Disconnect", null, (_, _) => Dispatcher.Invoke(DisconnectFromTray))
+        {
+            Enabled = false
+        };
+        menu.Items.Add(_trayConnect);
+        menu.Items.Add(_trayDisconnect);
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => Dispatcher.Invoke(ExitApp));
 
         _tray = new Forms.NotifyIcon
         {
             Text = "V2Ray Full Tunnel",
-            Icon = SystemIcons.Shield,
+            Icon = _iconOff ?? SystemIcons.Shield,
             Visible = true,
             ContextMenuStrip = menu
         };
         _tray.DoubleClick += (_, _) => Dispatcher.Invoke(ShowWindow);
+    }
+
+    /// <summary>آیکون وضعیت را در زمان اجرا می‌سازد (بدون فایل منبع اضافی).</summary>
+    private static System.Drawing.Icon CreateStatusIcon(System.Drawing.Color fill, string glyph)
+    {
+        using var bmp = new System.Drawing.Bitmap(32, 32);
+        using (var g = System.Drawing.Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(System.Drawing.Color.Transparent);
+            using var brush = new System.Drawing.SolidBrush(fill);
+            g.FillEllipse(brush, 1f, 1f, 30f, 30f);
+            using var font = new System.Drawing.Font("Segoe UI", 18f,
+                System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Pixel);
+            using var format = new System.Drawing.StringFormat
+            {
+                Alignment = System.Drawing.StringAlignment.Center,
+                LineAlignment = System.Drawing.StringAlignment.Center
+            };
+            g.DrawString(glyph, font, System.Drawing.Brushes.White, new System.Drawing.RectangleF(0, 0, 32, 32), format);
+        }
+        IntPtr h = bmp.GetHicon();
+        try { return (System.Drawing.Icon)System.Drawing.Icon.FromHandle(h).Clone(); }
+        finally { DestroyIcon(h); }
     }
 
     private void ShowWindow()
@@ -115,26 +156,41 @@ public partial class MainWindow : Window
     {
         try { _tunnel.Dispose(); } catch { }
         try { if (_tray != null) { _tray.Visible = false; _tray.Dispose(); _tray = null; } } catch { }
+        try { _iconOff?.Dispose(); _iconOn?.Dispose(); _iconBusy?.Dispose(); _iconError?.Dispose(); } catch { }
     }
 
     private async void ConnectFromTray()
     {
-        ShowWindow();
-        string link = LinkBox.Text.Trim();
-        if (!IsLinkValid() && !string.IsNullOrEmpty(_store.DefaultId))
+        if (_tunnel.State is TunnelState.Connected or TunnelState.Connecting) return;
+        ResolveLinkFromProfiles();
+        if (!IsLinkValid())
         {
-            var def = _store.Profiles.FirstOrDefault(p => p.Id == _store.DefaultId);
-            if (def != null) { LinkBox.Text = def.Link; link = def.Link; }
+            Balloon("No profile", "Open the window and add a valid profile first.", Forms.ToolTipIcon.Warning);
+            return;
         }
-        if (!IsLinkValid()) { Warn(DescribeInvalid()); return; }
-        await ConnectAsync();
+        await ConnectAsync(showDialog: false);
+        if (_tunnel.State == TunnelState.Connected)
+            Balloon("Connected", "All traffic now goes through the tunnel.", Forms.ToolTipIcon.Info);
+        else
+            Balloon("Connection failed", "Open the window to see the log.", Forms.ToolTipIcon.Error);
     }
 
     private async void DisconnectFromTray()
     {
-        ShowWindow();
-        await DisconnectAsync();
+        if (_tunnel.State == TunnelState.Disconnected) return;
+        await DisconnectAsync(showDialog: false);
+        Balloon("Disconnected", "The network has been restored.", Forms.ToolTipIcon.Info);
     }
+
+    private void ResolveLinkFromProfiles()
+    {
+        if (IsLinkValid() || string.IsNullOrEmpty(_store.DefaultId)) return;
+        var def = _store.Profiles.FirstOrDefault(p => p.Id == _store.DefaultId);
+        if (def != null) LinkBox.Text = def.Link;
+    }
+
+    private void Balloon(string title, string text, Forms.ToolTipIcon icon) =>
+        _tray?.ShowBalloonTip(2000, title, text, icon);
 
     // ---------- Profiles ----------
 
@@ -241,6 +297,7 @@ public partial class MainWindow : Window
     {
         if (_updatingProfile) return;
         ConnectBtn.IsEnabled = IsLinkValid() && _tunnel.State != TunnelState.Connected;
+        TestBtn.IsEnabled = IsLinkValid() && _tunnel.State != TunnelState.Connected;
         ConnectBtn.Opacity = IsLinkValid() ? 1.0 : 0.45;
     }
 
@@ -263,7 +320,7 @@ public partial class MainWindow : Window
 
     private async void OnDisconnect(object sender, RoutedEventArgs e) => await DisconnectAsync();
 
-    private async Task ConnectAsync()
+    private async Task ConnectAsync(bool showDialog = true)
     {
         SetBusy(true);
         try
@@ -275,16 +332,39 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             ApplyState(TunnelState.Failed, "Connection failed");
-            Warn(ex.Message);
+            Warn(ex.Message, showDialog);
         }
         finally { SetBusy(false); }
     }
 
-    private async Task DisconnectAsync()
+    private async Task DisconnectAsync(bool showDialog = true)
     {
         SetBusy(true);
         try { await Task.Run(() => _tunnel.Disconnect()); }
-        catch (Exception ex) { Warn(ex.Message); }
+        catch (Exception ex) { Warn(ex.Message, showDialog); }
+        finally { SetBusy(false); }
+    }
+
+    private async void OnTest(object sender, RoutedEventArgs e)
+    {
+        if (_tunnel.State == TunnelState.Connected)
+        {
+            Warn("Disconnect first, then test the profile.");
+            return;
+        }
+        SetBusy(true);
+        try
+        {
+            var link = LinkParser.Parse(LinkBox.Text);
+            Log("Testing profile (real proxy request, no system changes) ...");
+            string ip = await Task.Run(() => _tunnel.TestAsync(link));
+            Log($"Test passed - the profile works. Exit IP: {ip}");
+            ApplyState(TunnelState.Disconnected, "Ready to connect");
+            MessageBox.Show(
+                $"The profile works.\n\nExit IP through the tunnel: {ip}\n\nYou can press Connect now.",
+                "Test successful", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex) { Warn("Test failed: " + ex.Message); }
         finally { SetBusy(false); }
     }
 
@@ -308,6 +388,7 @@ public partial class MainWindow : Window
         BusyBar.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
         ConnectBtn.IsEnabled = !busy && _tunnel.State != TunnelState.Connected && IsLinkValid();
         DisconnectBtn.IsEnabled = !busy && _tunnel.State == TunnelState.Connected;
+        TestBtn.IsEnabled = !busy && _tunnel.State != TunnelState.Connected && IsLinkValid();
         CheckIpBtn.IsEnabled = !busy;
     }
 
@@ -332,11 +413,29 @@ public partial class MainWindow : Window
             ? "KillSwitch is on: while the tunnel is down, no traffic can leave directly."
             : "Select a saved profile and press Connect.";
         ConnectBtn.IsEnabled = state != TunnelState.Connected && IsLinkValid();
+        TestBtn.IsEnabled = state != TunnelState.Connected && IsLinkValid();
         DisconnectBtn.IsEnabled = state == TunnelState.Connected;
         if (_tray != null)
-            _tray.Text = state == TunnelState.Connected
-                ? "V2Ray Full Tunnel - CONNECTED"
-                : "V2Ray Full Tunnel";
+        {
+            _tray.Icon = state switch
+            {
+                TunnelState.Connected => _iconOn,
+                TunnelState.Connecting => _iconBusy,
+                TunnelState.Failed => _iconError,
+                _ => _iconOff
+            } ?? _iconOff ?? SystemIcons.Shield;
+            _tray.Text = state switch
+            {
+                TunnelState.Connected => "V2Ray Full Tunnel - CONNECTED",
+                TunnelState.Connecting => "V2Ray Full Tunnel - connecting ...",
+                TunnelState.Failed => "V2Ray Full Tunnel - failed",
+                _ => "V2Ray Full Tunnel - disconnected"
+            };
+        }
+        if (_trayConnect != null)
+            _trayConnect.Enabled = state is not (TunnelState.Connected or TunnelState.Connecting);
+        if (_trayDisconnect != null)
+            _trayDisconnect.Enabled = state != TunnelState.Disconnected;
         FooterNote.Text = state == TunnelState.Connected
             ? "Protected: no traffic can leave the machine outside the tunnel."
             : "Closing the window keeps the app in the system tray. Disconnect restores the network.";
@@ -369,9 +468,10 @@ public partial class MainWindow : Window
         LogBox.ScrollToEnd();
     }
 
-    private void Warn(string message)
+    private void Warn(string message, bool showDialog = true)
     {
         Log("ERROR: " + message);
-        MessageBox.Show(message, "V2Ray Full Tunnel", MessageBoxButton.OK, MessageBoxImage.Warning);
+        if (showDialog)
+            MessageBox.Show(message, "V2Ray Full Tunnel", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 }

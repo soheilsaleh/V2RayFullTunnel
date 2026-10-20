@@ -155,9 +155,10 @@ exit 0
     public static void Apply(string remoteIp, DefaultGateway gw, string coreExePath)
     {
         Directory.CreateDirectory(DataDir);
-        // حالت نیمه‌کاره از اجرای قبلی: مسیرهای ذخیره‌شده متعلق به خودمان است، پس
-        // خودمان برمی‌گردانیم و بلافاصله ادامه می‌دهیم (قبلاً خطا می‌داد و کاربر باید دوباره Connect می‌زد).
-        if (File.Exists(StatePath)) Restore();
+        // اگر وضعیتی از قبل ذخیره شده (اتصال فعال یا ریکانکت)، اسنپ‌شات اصلی کاربر حفظ می‌شود.
+        // مسیرهای پیش‌فرضی که در این فاصله دوباره ظاهر شده‌اند به همان اسنپ‌شات merge می‌شوند
+        // تا Disconnect نهایی همه‌چیز را برگرداند.
+        string? priorJson = File.Exists(StatePath) ? File.ReadAllText(StatePath) : null;
 
         var transcript = new List<string> { $"gw={gw.NextHop} if={gw.InterfaceAlias} server={remoteIp}" };
         string Run(string cmd)
@@ -176,8 +177,33 @@ exit 0
             }
         }
 
-        var v4 = ParseRoutes(Run("Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '0.0.0.0' -and $_.InterfaceAlias -notlike 'v2-tun*' } | Select-Object NextHop,InterfaceIndex,RouteMetric,InterfaceAlias | ConvertTo-Json"));
-        var v6 = ParseRoutes(Run("Get-NetRoute -DestinationPrefix '::/0' -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '::' -and $_.InterfaceAlias -notlike 'v2-tun*' } | Select-Object NextHop,InterfaceIndex,RouteMetric,InterfaceAlias | ConvertTo-Json"));
+        // هر دو اسنپ‌شات (IPv4 و IPv6) در یک پروسه‌ی پاورشل — نصف شدن زمان اعمال
+        string snapJson = Run(@"
+$v4 = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '0.0.0.0' -and $_.InterfaceAlias -notlike 'v2-tun*' } | Select-Object NextHop,InterfaceIndex,RouteMetric,InterfaceAlias)
+$v6 = @(Get-NetRoute -DestinationPrefix '::/0' -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '::' -and $_.InterfaceAlias -notlike 'v2-tun*' } | Select-Object NextHop,InterfaceIndex,RouteMetric,InterfaceAlias)
+[pscustomobject]@{ v4 = $v4; v6 = $v6 } | ConvertTo-Json -Depth 5 -Compress
+");
+        List<SavedRoute> v4, v6;
+        using (var snap = System.Text.Json.JsonDocument.Parse(snapJson))
+        {
+            v4 = ParseRoutes(snap.RootElement.GetProperty("v4"));
+            v6 = ParseRoutes(snap.RootElement.GetProperty("v6"));
+        }
+
+        // merge با اسنپ‌شات قبلی (اگر وجود دارد) تا در ریکانکت/تغییر شبکه چیزی گم نشود
+        if (priorJson != null)
+        {
+            try
+            {
+                var prior = System.Text.Json.JsonSerializer.Deserialize<SavedState>(priorJson);
+                if (prior != null)
+                {
+                    v4 = prior.V4.Concat(v4).Distinct().ToList();
+                    v6 = prior.V6.Concat(v6).Distinct().ToList();
+                }
+            }
+            catch { }
+        }
         var removed = new List<(string Prefix, SavedRoute R)>();
         var created = new List<string>();
         try
@@ -218,7 +244,12 @@ exit 0");
                 Ps($"New-NetRoute -DestinationPrefix '{prefix}' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -RouteMetric {r.RouteMetric} -Confirm:$false -ErrorAction SilentlyContinue");
             foreach (var c in created)
                 Ps($"Remove-NetRoute -DestinationPrefix '{c}' -Confirm:$false -ErrorAction SilentlyContinue; exit 0");
-            try { if (File.Exists(StatePath)) File.Delete(StatePath); } catch { }
+            try
+            {
+                if (priorJson != null) File.WriteAllText(StatePath, priorJson);
+                else if (File.Exists(StatePath)) File.Delete(StatePath);
+            }
+            catch { }
             throw new InvalidOperationException("KillSwitch ناتمام ماند و تغییرات برگردانده شد.\nمراحل:\n" + string.Join("\n", transcript), ex);
         }
     }
@@ -267,14 +298,21 @@ exit 0");
 
     private static List<SavedRoute> ParseRoutes(string json)
     {
-        var list = new List<SavedRoute>();
-        if (string.IsNullOrWhiteSpace(json) || json.Trim() == "null") return list;
+        if (string.IsNullOrWhiteSpace(json) || json.Trim() == "null") return new List<SavedRoute>();
         using var doc = System.Text.Json.JsonDocument.Parse(json);
-        var items = doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array
-            ? doc.RootElement.EnumerateArray()
-            : Enumerable.Repeat(doc.RootElement, 1);
+        return ParseRoutes(doc.RootElement);
+    }
+
+    private static List<SavedRoute> ParseRoutes(System.Text.Json.JsonElement root)
+    {
+        var list = new List<SavedRoute>();
+        if (root.ValueKind == System.Text.Json.JsonValueKind.Null) return list;
+        var items = root.ValueKind == System.Text.Json.JsonValueKind.Array
+            ? root.EnumerateArray()
+            : Enumerable.Repeat(root, 1);
         foreach (var el in items)
         {
+            if (el.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
             string alias = el.TryGetProperty("InterfaceAlias", out var al) ? al.GetString() ?? "" : "";
             list.Add(new SavedRoute(
                 el.GetProperty("NextHop").GetString() ?? "",

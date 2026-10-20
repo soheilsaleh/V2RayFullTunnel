@@ -3,7 +3,7 @@ using V2RayFullTunnel.Common;
 
 namespace V2RayFullTunnel.Core;
 
-/// <summary>ساخت کانفیگ sing-box با TUN سراسری + DNS ضد نشت (قدم ۱ و ۲).</summary>
+/// <summary>ساخت کانفیگ sing-box: نسخه‌ی TUN سراسری، و نسخه‌ی تست (بدون TUN).</summary>
 public static class SingBoxConfigBuilder
 {
     private static JsonObject BuildTls(ProxyLink link, bool defaultEnabled)
@@ -45,15 +45,7 @@ public static class SingBoxConfigBuilder
         return outbound;
     }
 
-    private static JsonArray BuildOutbounds(JsonNode proxy, string? bindInterface)
-    {
-        var direct = new JsonObject { ["type"] = "direct", ["tag"] = "direct" };
-        if (!string.IsNullOrEmpty(bindInterface)) direct["bind_interface"] = bindInterface;
-        return new JsonArray { proxy, direct, new JsonObject { ["type"] = "block", ["tag"] = "block" } };
-    }
-
-    /// <param name="bindInterface">نام دقیق اینترفیس فیزیکی (از KillSwitch.GetDefaultGateway)؛ حیاتی برای KillSwitch مسیری.</param>
-    public static string Build(ProxyLink link, string? bindInterface)
+    private static JsonObject BuildProxyOutbound(ProxyLink link, string? bindInterface)
     {
         JsonNode outbound = link.Protocol switch
         {
@@ -86,63 +78,102 @@ public static class SingBoxConfigBuilder
                 ["tls"] = BuildTls(link, defaultEnabled: false)
             }, link)
         };
-        if (outbound is JsonObject proxyOb && !string.IsNullOrEmpty(bindInterface))
-            proxyOb["bind_interface"] = bindInterface;
-
-        var config = new JsonObject
-        {
-            ["log"] = new JsonObject { ["level"] = "info" },
-            ["dns"] = new JsonObject
-            {
-                ["servers"] = new JsonArray
-                {
-                    new JsonObject
-                    {
-                        ["tag"] = "direct-dns",
-                        ["type"] = "udp",
-                        ["server"] = "223.5.5.5"
-                    }
-                },
-                ["rules"] = new JsonArray(),
-                ["final"] = "direct-dns" // موقتاً ساده: DoH در این شبکه رهگیری می‌شود؛ بعداً از داخل تونل سالم برمی‌گردد
-            },
-            ["inbounds"] = new JsonArray
-            {
-                new JsonObject
-                {
-                    ["type"] = "tun",
-                    ["tag"] = "tun-in",
-                    ["interface_name"] = "v2-tun",
-                    ["address"] = new JsonArray { "172.18.0.1/30" },
-                    ["auto_route"] = true,
-                    ["strict_route"] = true,
-                    ["stack"] = "gvisor"
-                },
-                new JsonObject
-                {
-                    ["type"] = "mixed",
-                    ["tag"] = "mixed-in",
-                    ["listen"] = "127.0.0.1",
-                    ["listen_port"] = 10808
-                }
-            },
-            ["outbounds"] = BuildOutbounds(outbound, bindInterface),
-            ["route"] = new JsonObject
-            {
-                ["auto_detect_interface"] = true,
-                ["default_domain_resolver"] = new JsonObject { ["server"] = "direct-dns" },
-                ["rules"] = new JsonArray
-                {
-                    new JsonObject { ["protocol"] = "dns", ["action"] = "hijack-dns" },
-                    // DNS بوت‌استرپ مستقیم می‌رود (detour به direct خالی در 1.14 خطاست)
-                    new JsonObject { ["ip_cidr"] = new JsonArray { "223.5.5.5/32" }, ["outbound"] = "direct" },
-                    // اتصال خود هسته به سرور نباید وارد تونل شود (جلوگیری از loop)
-                    new JsonObject { ["domain"] = new JsonArray { link.Address }, ["outbound"] = "direct" }
-                },
-                ["final"] = "proxy"
-            }
-        };
-        return System.Text.Json.JsonSerializer.Serialize(config,
-            new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        var proxy = (JsonObject)outbound;
+        if (!string.IsNullOrEmpty(bindInterface))
+            proxy["bind_interface"] = bindInterface;
+        return proxy;
     }
+
+    private static JsonArray BuildOutbounds(JsonNode proxy, string? bindInterface)
+    {
+        var direct = new JsonObject { ["type"] = "direct", ["tag"] = "direct" };
+        if (!string.IsNullOrEmpty(bindInterface)) direct["bind_interface"] = bindInterface;
+        return new JsonArray { proxy, direct, new JsonObject { ["type"] = "block", ["tag"] = "block" } };
+    }
+
+    private static JsonObject BuildDns() => new()
+    {
+        ["servers"] = new JsonArray
+        {
+            new JsonObject
+            {
+                ["tag"] = "direct-dns",
+                ["type"] = "udp",
+                ["server"] = "223.5.5.5"
+            }
+        },
+        ["rules"] = new JsonArray(),
+        // DoH در این شبکه رهگیری می‌شود؛ DNS ساده‌ی UDP پایدارتر است.
+        ["final"] = "direct-dns"
+    };
+
+    private static JsonObject BuildRoute(ProxyLink link) => new()
+    {
+        ["auto_detect_interface"] = true,
+        ["default_domain_resolver"] = new JsonObject { ["server"] = "direct-dns" },
+        ["rules"] = new JsonArray
+        {
+            new JsonObject { ["protocol"] = "dns", ["action"] = "hijack-dns" },
+            // DNS بوت‌استرپ مستقیم می‌رود تا هسته بتواند سرور را رزولو کند
+            new JsonObject { ["ip_cidr"] = new JsonArray { "223.5.5.5/32" }, ["outbound"] = "direct" },
+            // اتصال خود هسته به سرور نباید وارد تونل شود (جلوگیری از loop)
+            new JsonObject { ["domain"] = new JsonArray { link.Address }, ["outbound"] = "direct" }
+        },
+        ["final"] = "proxy"
+    };
+
+    private static string Serialize(JsonObject config) =>
+        System.Text.Json.JsonSerializer.Serialize(config,
+            new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+
+    /// <param name="bindInterface">نام دقیق اینترفیس فیزیکی (از KillSwitch.GetGatewayTo)؛ حیاتی برای KillSwitch مسیری.</param>
+    public static string Build(ProxyLink link, string? bindInterface) => Serialize(new JsonObject
+    {
+        ["log"] = new JsonObject { ["level"] = "info" },
+        ["dns"] = BuildDns(),
+        ["inbounds"] = new JsonArray
+        {
+            new JsonObject
+            {
+                ["type"] = "tun",
+                ["tag"] = "tun-in",
+                ["interface_name"] = "v2-tun",
+                ["address"] = new JsonArray { "172.18.0.1/30" },
+                ["auto_route"] = true,
+                ["strict_route"] = true,
+                ["stack"] = "gvisor"
+            },
+            new JsonObject
+            {
+                ["type"] = "mixed",
+                ["tag"] = "mixed-in",
+                ["listen"] = "127.0.0.1",
+                ["listen_port"] = 10808
+            }
+        },
+        ["outbounds"] = BuildOutbounds(BuildProxyOutbound(link, bindInterface), bindInterface),
+        ["route"] = BuildRoute(link)
+    });
+
+    /// <summary>
+    /// کانفیگ تست: فقط یک inbound محلی (بدون TUN و بدون Kill Switch).
+    /// هیچ مسیری در سیستم تغییر نمی‌کند؛ فقط صحت پروتکل/اعتبارنامه بررسی می‌شود.
+    /// </summary>
+    public static string BuildProbe(ProxyLink link, string? bindInterface, int mixedPort) => Serialize(new JsonObject
+    {
+        ["log"] = new JsonObject { ["level"] = "warn" },
+        ["dns"] = BuildDns(),
+        ["inbounds"] = new JsonArray
+        {
+            new JsonObject
+            {
+                ["type"] = "mixed",
+                ["tag"] = "mixed-in",
+                ["listen"] = "127.0.0.1",
+                ["listen_port"] = mixedPort
+            }
+        },
+        ["outbounds"] = BuildOutbounds(BuildProxyOutbound(link, bindInterface), bindInterface),
+        ["route"] = BuildRoute(link)
+    });
 }

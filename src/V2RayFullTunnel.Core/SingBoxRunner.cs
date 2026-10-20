@@ -59,7 +59,7 @@ public sealed class SingBoxRunner : IDisposable
             if (_proc is { HasExited: false })
             {
                 _proc.Kill(entireProcessTree: true);
-                _proc.WaitForExit(5000);
+                _proc.WaitForExit(2500);
             }
         }
         catch { }

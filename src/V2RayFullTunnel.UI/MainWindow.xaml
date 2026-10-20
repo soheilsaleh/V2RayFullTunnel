@@ -160,11 +160,15 @@
             </StackPanel>
           </Border>
 
-          <UniformGrid Grid.Row="2" Columns="3">
+          <UniformGrid Grid.Row="2" Columns="4">
             <Button x:Name="ConnectBtn" Content="Connect" Height="42" Margin="0,0,6,0" Click="OnConnect"
                     Background="{StaticResource B.Accent}" Foreground="White" Style="{StaticResource FlatButton}"/>
             <Button x:Name="DisconnectBtn" Content="Disconnect" Height="42" Margin="3,0" Click="OnDisconnect"
                     Background="#EEF1F5" Foreground="{StaticResource B.Text}" IsEnabled="False"
+                    Style="{StaticResource FlatButton}"/>
+            <Button x:Name="TestBtn" Content="Test" Height="42" Margin="3,0" Click="OnTest"
+                    Background="{StaticResource B.AccentSoft}" Foreground="#1B4FA8"
+                    ToolTip="Run a real proxy request through this profile, without changing system routes"
                     Style="{StaticResource FlatButton}"/>
             <Button x:Name="CheckIpBtn" Content="Check IP" Height="42" Margin="6,0,0,0" Click="OnCheckIp"
                     Background="#EEF1F5" Foreground="{StaticResource B.Text}" Style="{StaticResource FlatButton}"/>
