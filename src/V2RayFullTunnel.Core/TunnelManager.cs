@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.RegularExpressions;
 using V2RayFullTunnel.Common;
 using V2RayFullTunnel.Firewall;
 
@@ -11,6 +12,8 @@ public enum TunnelState { Disconnected, Connecting, Connected, Failed }
 /// <summary>همه منطق تونل در یک جا؛ UI فقط صداش می‌کند.</summary>
 public sealed class TunnelManager : IDisposable
 {
+    private const int MixedPort = 10808;
+    private static readonly Regex AnsiRegex = new(@"\x1B\[[0-9;]*m", RegexOptions.Compiled);
     public event Action<string>? Log;
     public event Action<TunnelState, string>? StateChanged;
 
@@ -21,12 +24,16 @@ public sealed class TunnelManager : IDisposable
 
     // ریکانکت خودکار: تا وقتی کاربر Disconnect نزده، قطعی هسته/شبکه به‌صورت خودکار ترمیم می‌شود.
     private ProxyLink? _lastLink;
+    private string? _lastServerIp;
     private volatile bool _autoReconnect;
     private volatile bool _stopping;
     private int _reconnectActive;
     private int _healthActive;
     private int _healthFails;
     private DateTime _lastHealth = DateTime.MinValue;
+    private DateTime _lastLockCheck = DateTime.MinValue;
+    private long _lastCoreLogTicks;
+    private int _coreSuppressed;
     private readonly object _gate = new();
     private System.Threading.Timer? _watchdog;
 
@@ -63,6 +70,33 @@ public sealed class TunnelManager : IDisposable
 
     private void Write(string m) => Log?.Invoke(m);
 
+    /// <summary>فقط خطوط مهم هسته (خطا/هشدار) به UI می‌رود تا لاگ قابل خواندن بماند.</summary>
+    private void WriteCore(string m)
+    {
+        string line = AnsiRegex.Replace(m, "").TrimEnd();
+        if (line.Length == 0) return;
+
+        bool fatal = line.Contains("FATAL", StringComparison.OrdinalIgnoreCase)
+                     || line.Contains("panic", StringComparison.OrdinalIgnoreCase);
+        bool important = fatal
+                         || line.Contains("ERROR", StringComparison.OrdinalIgnoreCase)
+                         || line.Contains("WARN", StringComparison.OrdinalIgnoreCase);
+        if (!important) return;
+
+        // سیل خطاهای تکراری (مثل DNS down) لاگ را غیرقابل‌استفاده می‌کند؛
+        // حداکثر یکی هر ۱.۵ ثانیه، با شمارش موارد سرکوب‌شده.
+        long now = Environment.TickCount64;
+        if (!fatal && now - Interlocked.Read(ref _lastCoreLogTicks) < 1500)
+        {
+            Interlocked.Increment(ref _coreSuppressed);
+            return;
+        }
+        Interlocked.Exchange(ref _lastCoreLogTicks, now);
+        int suppressed = Interlocked.Exchange(ref _coreSuppressed, 0);
+        if (suppressed > 0) Write($"core: (+{suppressed} similar messages suppressed)");
+        Write("core: " + line);
+    }
+
     public void Connect(ProxyLink link)
     {
         if (IsConnected) throw new InvalidOperationException("Already connected.");
@@ -71,14 +105,24 @@ public sealed class TunnelManager : IDisposable
         lock (_gate) ConnectInternal(link, "Connecting...");
     }
 
-    private void ConnectInternal(ProxyLink link, string connectingMessage)
+    private void ConnectInternal(ProxyLink link, string connectingMessage, string? preferredServerIp = null)
     {
         Set(TunnelState.Connecting, connectingMessage);
 
         // ترتیب حیاتی: اول رزولو و گیت‌وی، چون بعد از روشن شدن TUN دیگر در دسترس نیست.
         // گیت‌وی را از مسیر واقعیِ رسیدن به سرور می‌گیریم (نه کمترین متریک)، چون ویندوز ممکن است
         // چند مسیر پیش‌فرض داشته باشد (VPN/Fortinet/OpenVPN/VMware) و کمترین متریک گمراه‌کننده باشد.
-        string serverIp = KillSwitch.ResolveServerIp(link.Address);
+        string serverIp;
+        if (!string.IsNullOrEmpty(preferredServerIp))
+        {
+            // ریکانکت‌های اولیه نباید به DNS وابسته باشند (وقتی شبکه تازه برگشته، DNS هنوز ممکن است کار نکند).
+            serverIp = preferredServerIp!;
+        }
+        else
+        {
+            serverIp = KillSwitch.ResolveServerIp(link.Address);
+            _lastServerIp = serverIp;
+        }
         var gw = KillSwitch.GetGatewayTo(serverIp);
         Write($"Server: {serverIp} | Gateway: {gw.InterfaceAlias} ({gw.NextHop})");
 
@@ -99,14 +143,14 @@ public sealed class TunnelManager : IDisposable
                 Write($"TUN did not start; cleaning up and retrying ({attempt}/3)...");
                 _runner?.Dispose();
                 _runner = null;
-                KillSwitch.CleanupTunnelResidue();
+                KillSwitch.CleanupTunnelResidue(killStrayCore: true);
                 Thread.Sleep(1500);
             }
             try
             {
                 var runner = new SingBoxRunner(_exePath, _configPath);
                 _runner = runner;
-                runner.OnLog += Write;
+                runner.OnLog += WriteCore;
                 runner.OnExited += code => OnCoreExited(runner, code);
                 if (!runner.CheckConfig(out string checkOut))
                 {
@@ -143,11 +187,24 @@ public sealed class TunnelManager : IDisposable
         {
             _runner?.Dispose();
             _runner = null;
+            KillSwitch.CleanupTunnelResidue(killStrayCore: true);
             KillSwitch.Restore(silent: true);
-            KillSwitch.CleanupTunnelResidue();
             Set(TunnelState.Failed, "KillSwitch failed - tunnel stopped");
             throw;
         }
+        // تأیید واقعی: اگر با وجود بالا آمدن TUN هیچ ترافیکی از پروکسی عبور نکند،
+        // اتصال را موفق اعلام نمی‌کنیم (قبلاً «سبز» می‌شد ولی اینترنت نداشت).
+        if (!ProxyWorks(TimeSpan.FromSeconds(6)))
+        {
+            _runner?.Dispose();
+            _runner = null;
+            try { KillSwitch.CleanupTunnelResidue(killStrayCore: true); } catch { }
+            try { KillSwitch.Restore(silent: true); } catch { }
+            Set(TunnelState.Failed, "The tunnel started but no traffic passed through it");
+            throw new InvalidOperationException(
+                "the tunnel started but no traffic passed through it (server/DNS unreachable)");
+        }
+
         Write("KillSwitch on: without the tunnel, direct internet is blocked.");
         _healthFails = 0;
         _lastHealth = DateTime.UtcNow;
@@ -160,17 +217,21 @@ public sealed class TunnelManager : IDisposable
         while (sw.Elapsed < timeout)
         {
             if (_runner is { IsRunning: false }) return false;
-            try
-            {
-                var nics = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces();
-                if (nics.Any(n => n.Name.StartsWith("v2-tun", StringComparison.OrdinalIgnoreCase)
-                                  && n.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up))
-                    return true;
-            }
-            catch { }
+            if (TunIsUp()) return true;
             Thread.Sleep(150);
         }
         return false;
+    }
+
+    private static bool TunIsUp()
+    {
+        try
+        {
+            return System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+                .Any(n => n.Name.StartsWith("v2-tun", StringComparison.OrdinalIgnoreCase)
+                          && n.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up);
+        }
+        catch { return false; }
     }
 
     private void OnCoreExited(SingBoxRunner source, int code)
@@ -206,35 +267,86 @@ public sealed class TunnelManager : IDisposable
                 return;
             }
 
-            if (DateTime.UtcNow - _lastHealth < TimeSpan.FromSeconds(10)) return;
-            _lastHealth = DateTime.UtcNow;
-            _ = HealthCheckAsync();
+            if (DateTime.UtcNow - _lastHealth >= TimeSpan.FromSeconds(15))
+            {
+                _lastHealth = DateTime.UtcNow;
+                _ = HealthCheckAsync();
+            }
+
+            // ویندوز بعد از تغییر شبکه (قطع/وصل Wi-Fi) مسیرهای پیش‌فرض را برمی‌گرداند؛
+            // قفل مسیری باید دوباره اعمال شود، وگرنه ترافیک مستقیم از کنار تونل عبور می‌کند.
+            if (DateTime.UtcNow - _lastLockCheck < TimeSpan.FromSeconds(30)) return;
+            _lastLockCheck = DateTime.UtcNow;
+            if (!Monitor.TryEnter(_gate)) return;
+            try
+            {
+                if (_autoReconnect && _state == TunnelState.Connected && KillSwitch.RefreshLock())
+                {
+                    Write("Network change detected: physical default routes blocked again.");
+                    _lastHealth = DateTime.MinValue; // health check فوری‌تر
+                }
+            }
+            catch (Exception ex) { Write("Kill switch refresh failed: " + ex.Message); }
+            finally { Monitor.Exit(_gate); }
         }
         catch { }
     }
 
+    /// <summary>
+    /// سلامت تونل را از طریق inbound محلی خود هسته می‌سنجد (نه مسیر سیستم)،
+    /// تا نوسان DNS ویندوز باعث ریکانکت‌های بی‌مورد نشود. تا ۳ خطای متوالی صبر می‌کنیم.
+    /// </summary>
     private async Task HealthCheckAsync()
     {
         if (Interlocked.Exchange(ref _healthActive, 1) == 1) return;
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            if (!TunIsUp())
+            {
+                ScheduleReconnect("TUN interface is down");
+                return;
+            }
+
+            using var handler = new HttpClientHandler
+            {
+                Proxy = new WebProxy($"http://127.0.0.1:{MixedPort}"),
+                UseProxy = true
+            };
+            using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            await http.GetStringAsync("https://www.gstatic.com/generate_204", cts.Token);
+            await http.GetStringAsync("http://api.ipify.org", cts.Token);
             if (_healthFails > 0) Write("Health check: the tunnel is reachable again.");
             _healthFails = 0;
         }
         catch
         {
             _healthFails++;
-            Write($"Health check failed ({_healthFails}/2).");
-            if (_healthFails >= 2)
+            Write($"Health check failed ({_healthFails}/3).");
+            if (_healthFails >= 3)
             {
                 _healthFails = 0;
                 ScheduleReconnect("no traffic through the tunnel");
             }
         }
         finally { Interlocked.Exchange(ref _healthActive, 0); }
+    }
+
+    /// <summary>یک درخواست واقعی از طریق inbound محلی هسته؛ true یعنی تونل واقعاً ترافیک عبور می‌دهد.</summary>
+    private static bool ProxyWorks(TimeSpan timeout)
+    {
+        try
+        {
+            using var handler = new HttpClientHandler
+            {
+                Proxy = new WebProxy($"http://127.0.0.1:{MixedPort}"),
+                UseProxy = true
+            };
+            using var http = new HttpClient(handler) { Timeout = timeout };
+            using var cts = new CancellationTokenSource(timeout);
+            http.GetStringAsync("http://api.ipify.org", cts.Token).GetAwaiter().GetResult();
+            return true;
+        }
+        catch { return false; }
     }
 
     private void ScheduleReconnect(string reason)
@@ -260,7 +372,17 @@ public sealed class TunnelManager : IDisposable
                     {
                         if (!_autoReconnect) return;
                         TryStopCore();
-                        ConnectInternal(link, $"Reconnecting... (attempt {attempt}/{maxAttempts})");
+
+                        // مهم: قبل از تلاش مجدد، شبکه را برمی‌گردانیم.
+                        // با KillSwitch فعال، رزولو کردن DNS سرور و مسیرهای جدید ممکن نیست
+                        // (همان چیزی که باعث می‌شد ریکانکت هیچ‌وقت موفق نشود و فقط
+                        // Disconnect/Connect دستی جواب بدهد).
+                        try { KillSwitch.CleanupTunnelResidue(killStrayCore: true); } catch { }
+                        try { KillSwitch.Restore(silent: true); } catch { }
+
+                        // تلاش اول با IP کش‌شده (بدون DNS)؛ تلاش‌های بعدی رزولوشن تازه.
+                        string? preferred = attempt == 1 ? _lastServerIp : null;
+                        ConnectInternal(link, $"Reconnecting... (attempt {attempt}/{maxAttempts})", preferred);
                     }
                     Write("Auto-reconnect succeeded.");
                     return;
@@ -277,14 +399,23 @@ public sealed class TunnelManager : IDisposable
 
             // بعد از تلاش‌های ناموفق، شبکه را برمی‌گردانیم تا کاربر بدون اینترنت گیر نکند.
             Write("Auto-reconnect gave up. Restoring the network.");
+            bool netOk;
             lock (_gate)
             {
                 TryStopCore();
-                try { KillSwitch.Restore(silent: true); } catch { }
-                try { KillSwitch.CleanupTunnelResidue(); } catch { }
+                try { KillSwitch.CleanupTunnelResidue(killStrayCore: true); } catch { }
+                netOk = KillSwitch.Restore(silent: true);
             }
             _autoReconnect = false;
-            Set(TunnelState.Failed, "Reconnect failed - network restored, press Connect to retry");
+            if (netOk)
+            {
+                Set(TunnelState.Failed, "Reconnect failed - network restored, press Connect to retry");
+            }
+            else
+            {
+                Write("WARNING: could not restore a default route. Try Disconnect; if that fails, reboot.");
+                Set(TunnelState.Failed, "Reconnect failed - network could not be restored (reboot may be needed)");
+            }
         }
         catch (Exception ex) { Write("Auto-reconnect error: " + ex.Message); }
         finally { Interlocked.Exchange(ref _reconnectActive, 0); }
@@ -301,25 +432,35 @@ public sealed class TunnelManager : IDisposable
     public void Disconnect()
     {
         _autoReconnect = false;
+        bool netOk;
         lock (_gate)
         {
             TryStopCore();
             // kill سخت باعث می‌شود شیء آداپتور در درایور بماند؛ همین‌جا پاکش می‌کنیم
-            if (!KillSwitch.CleanupTunnelResidue())
+            if (!KillSwitch.CleanupTunnelResidue(killStrayCore: true))
                 Write("NOTE: TUN adapter residue left behind; a reboot may be needed before the next Connect.");
-            KillSwitch.Restore();
+            netOk = KillSwitch.Restore();
         }
-        Write("Tunnel stopped and network restored.");
-        Set(TunnelState.Disconnected, "Disconnected - network restored");
+        if (netOk)
+        {
+            Write("Tunnel stopped and network restored.");
+            Set(TunnelState.Disconnected, "Disconnected - network restored");
+        }
+        else
+        {
+            Write("WARNING: no default route after disconnect. Restarting the network adapter did not help either; a reboot may be needed.");
+            Set(TunnelState.Disconnected, "Disconnected - network could not be restored (reboot may be needed)");
+        }
     }
 
     public void RestoreNetwork()
     {
         _autoReconnect = false;
-        KillSwitch.Restore();
         TryStopCore();
-        Write("Network restored.");
-        Set(TunnelState.Disconnected, "Ready to connect");
+        try { KillSwitch.CleanupTunnelResidue(killStrayCore: true); } catch { }
+        bool ok = KillSwitch.Restore(silent: true);
+        Write(ok ? "Network restored." : "WARNING: network could not be fully restored; a reboot may be needed.");
+        Set(TunnelState.Disconnected, ok ? "Ready to connect" : "Network could not be restored (reboot may be needed)");
     }
 
     public async Task<string> CheckExitIpAsync(CancellationToken ct = default)
@@ -396,8 +537,8 @@ public sealed class TunnelManager : IDisposable
         // خروج واقعی از برنامه = برگرداندن شبکه
         _autoReconnect = false;
         try { _watchdog?.Dispose(); } catch { }
-        try { KillSwitch.Restore(silent: true); } catch { }
         try { _runner?.Dispose(); } catch { }
-        try { KillSwitch.CleanupTunnelResidue(); } catch { }
+        try { KillSwitch.CleanupTunnelResidue(killStrayCore: true); } catch { }
+        try { KillSwitch.Restore(silent: true); } catch { }
     }
 }

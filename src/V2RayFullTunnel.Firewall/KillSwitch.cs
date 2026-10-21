@@ -106,16 +106,34 @@ exit 0
     /// ("create adapter: already exists / open existing adapter: Element not found").
     /// بدون این، فقط ریبوت سیستم مشکل را حل می‌کند. true یعنی تمیز شد.
     /// </summary>
-    public static bool CleanupTunnelResidue(int attempts = 4)
+    public static bool CleanupTunnelResidue(int attempts = 4, bool killStrayCore = false)
     {
         try
         {
-            if (System.Diagnostics.Process.GetProcessesByName("sing-box").Length > 0) return false;
+            var procs = System.Diagnostics.Process.GetProcessesByName("sing-box");
+            if (procs.Length > 0)
+            {
+                // فقط وقتی مجاز است که مطمئنیم تونل باید بسته شود (Disconnect / give-up).
+                if (!killStrayCore) return false;
+                foreach (var p in procs)
+                {
+                    try { p.Kill(entireProcessTree: true); } catch { }
+                }
+                System.Threading.Thread.Sleep(800);
+            }
 
             // مسیر سریع: اگر بازمانده‌ای نیست، هیچ ثانیه‌ای تلف نشود (قبلاً همیشه ۱.۵ ثانیه می‌خوابید).
-            const string filter = "$_.Name -like 'v2-tun*' -or $_.InterfaceDescription -like '*Wintun*' -or $_.InterfaceDescription -like '*sing-tun*'";
-            string probe = Ps($"Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {{ {filter} }} | Select-Object Name | ConvertTo-Json -Compress; exit 0");
-            if (string.IsNullOrWhiteSpace(probe) || probe.Trim() == "null" || probe.Trim() == "[]")
+            // علاوه بر NetAdapter، دستگاه‌های PnP «شبح» (Status != OK) هم بررسی می‌شوند؛ همان‌هایی که
+            // باعث خطای create adapter: already exists می‌شدند و Get-NetAdapter آن‌ها را نشان نمی‌داد.
+            const string adapterFilter = "$_.Name -like 'v2-tun*' -or $_.InterfaceDescription -like '*Wintun*' -or $_.InterfaceDescription -like '*sing-tun*'";
+            const string ghostFilter = "$_.Status -ne 'OK' -and ($_.InstanceId -like '*WINTUN*' -or $_.FriendlyName -like '*sing-tun*' -or $_.FriendlyName -like '*v2-tun*' -or $_.FriendlyName -like '*tun*Tunnel*')";
+            string countScript = $@"
+$a = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {{ {adapterFilter} }}).Count
+$p = @(Get-PnpDevice -Class Net -ErrorAction SilentlyContinue | Where-Object {{ {ghostFilter} }}).Count
+[pscustomobject]@{{ a = $a; p = $p }} | ConvertTo-Json -Compress
+exit 0";
+
+            if (CleanProbe(Ps(countScript)))
                 return true;
 
             for (int i = 0; i < attempts; i++)
@@ -123,19 +141,34 @@ exit 0
                 System.Threading.Thread.Sleep(i == 0 ? 600 : 1500); // آزاد شدن هندل درایور
                 Ps("Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -like 'v2-tun*' } | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue; exit 0");
 
-                string json = Ps($"Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {{ {filter} }} | Select-Object Name | ConvertTo-Json -Compress; exit 0");
-                if (string.IsNullOrWhiteSpace(json) || json.Trim() == "null" || json.Trim() == "[]")
+                if (CleanProbe(Ps(countScript)))
                     return true; // چیزی برای پاکسازی نمانده
 
-                Ps($"Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {{ {filter} }} | ForEach-Object {{ Disable-NetAdapter -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue }}; exit 0");
-                System.Threading.Thread.Sleep(400);
-                Ps($"Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {{ {filter} }} | ForEach-Object {{ Remove-NetAdapter -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue }}; exit 0");
-                System.Threading.Thread.Sleep(400);
-                // آخرین شانس: دستگاه شبح (Status=Unknown) فقط با حذف PnP پاک می‌شود.
-                // نام دستگاه ممکن است «sing-tun Tunnel» یا «Wintun» باشد، پس روی InstanceId هم فیلتر می‌کنیم.
-                Ps("Get-PnpDevice -Class Net -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -like '*Wintun*' -or $_.FriendlyName -like '*tun*Tunnel*' -or $_.InstanceId -like '*WINTUN*' } | ForEach-Object { pnputil /remove-device $_.InstanceId /subtree | Out-Null }; exit 0");
+                Ps($"Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {{ {adapterFilter} }} | ForEach-Object {{ Disable-NetAdapter -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue }}; exit 0");
+                System.Threading.Thread.Sleep(300);
+
+                // دستگاه شبح (Status=Unknown) فقط با حذف PnP پاک می‌شود.
+                Ps($"Get-PnpDevice -Class Net -ErrorAction SilentlyContinue | Where-Object {{ {ghostFilter} }} | ForEach-Object {{ try {{ Remove-PnpDevice -InstanceId $_.InstanceId -Confirm:$false -ErrorAction Stop }} catch {{ }} }}; exit 0");
+                System.Threading.Thread.Sleep(200);
+
+                Ps($"Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {{ {adapterFilter} }} | ForEach-Object {{ Remove-NetAdapter -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue }}; exit 0");
+                System.Threading.Thread.Sleep(300);
+
+                // آخرین شانس: حذف در سطح درایور
+                Ps($"Get-PnpDevice -Class Net -ErrorAction SilentlyContinue | Where-Object {{ {ghostFilter} }} | ForEach-Object {{ pnputil /remove-device $_.InstanceId /subtree | Out-Null }}; exit 0");
             }
             return false;
+        }
+        catch { return false; }
+    }
+
+    private static bool CleanProbe(string json)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            return doc.RootElement.GetProperty("a").GetInt32() == 0
+                && doc.RootElement.GetProperty("p").GetInt32() == 0;
         }
         catch { return false; }
     }
@@ -254,27 +287,124 @@ exit 0");
         }
     }
 
-    public static void Restore(bool silent = false)
+    public static bool Restore(bool silent = false)
     {
         try
         {
-            if (!File.Exists(StatePath)) return;
-            var state = System.Text.Json.JsonSerializer.Deserialize<SavedState>(File.ReadAllText(StatePath))
-                ?? throw new InvalidOperationException("فایل حالت خراب است.");
+            SavedState? state = null;
+            if (File.Exists(StatePath))
+            {
+                try { state = System.Text.Json.JsonSerializer.Deserialize<SavedState>(File.ReadAllText(StatePath)); }
+                catch { state = null; }
+            }
+
             // همه‌ی بازیابی در یک پروسه پاورشل (قبلاً هر مسیر ۲ پروسه و قطع‌وصل را کند می‌کرد).
             var sb = new System.Text.StringBuilder("$ErrorActionPreference='Continue';");
-            sb.Append($"Remove-NetRoute -DestinationPrefix '{state.ServerIp}/32' -Confirm:$false -ErrorAction SilentlyContinue;");
-            if (!string.IsNullOrEmpty(state.BootstrapIp))
-                sb.Append($"Remove-NetRoute -DestinationPrefix '{state.BootstrapIp}/32' -Confirm:$false -ErrorAction SilentlyContinue;");
-            foreach (var r in state.V4.Where(x => !string.IsNullOrEmpty(x.NextHop) && x.InterfaceIndex > 0))
-                sb.Append($"if (-not (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object {{ $_.NextHop -eq '{r.NextHop}' -and $_.InterfaceIndex -eq {r.InterfaceIndex} }})) {{ New-NetRoute -DestinationPrefix '0.0.0.0/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -RouteMetric {r.RouteMetric} -Confirm:$false -ErrorAction SilentlyContinue }};");
-            foreach (var r in state.V6.Where(x => !string.IsNullOrEmpty(x.NextHop) && x.InterfaceIndex > 0))
-                sb.Append($"if (-not (Get-NetRoute -DestinationPrefix '::/0' -ErrorAction SilentlyContinue | Where-Object {{ $_.NextHop -eq '{r.NextHop}' -and $_.InterfaceIndex -eq {r.InterfaceIndex} }})) {{ New-NetRoute -DestinationPrefix '::/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -RouteMetric {r.RouteMetric} -Confirm:$false -ErrorAction SilentlyContinue }};");
+
+            // مسیرهای آداپتور TUN باید حتی بدون فایل حالت هم حذف شوند.
+            // آداپتور زامبیِ Wintun می‌تواند مسیر پیش‌فرض را حفظ کند و کل اینترنت را قطع کند
+            // (همان حالتی که فقط با ری‌استارت ویندوز حل می‌شد).
+            sb.Append("Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -like 'v2-tun*' } | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue;");
+
+            if (state != null)
+            {
+                sb.Append($"Remove-NetRoute -DestinationPrefix '{state.ServerIp}/32' -Confirm:$false -ErrorAction SilentlyContinue;");
+                if (!string.IsNullOrEmpty(state.BootstrapIp))
+                    sb.Append($"Remove-NetRoute -DestinationPrefix '{state.BootstrapIp}/32' -Confirm:$false -ErrorAction SilentlyContinue;");
+                foreach (var r in state.V4.Where(x => !string.IsNullOrEmpty(x.NextHop) && x.InterfaceIndex > 0))
+                    sb.Append($"if (-not (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object {{ $_.NextHop -eq '{r.NextHop}' -and $_.InterfaceIndex -eq {r.InterfaceIndex} }})) {{ New-NetRoute -DestinationPrefix '0.0.0.0/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -RouteMetric {r.RouteMetric} -Confirm:$false -ErrorAction SilentlyContinue }};");
+                foreach (var r in state.V6.Where(x => !string.IsNullOrEmpty(x.NextHop) && x.InterfaceIndex > 0))
+                    sb.Append($"if (-not (Get-NetRoute -DestinationPrefix '::/0' -ErrorAction SilentlyContinue | Where-Object {{ $_.NextHop -eq '{r.NextHop}' -and $_.InterfaceIndex -eq {r.InterfaceIndex} }})) {{ New-NetRoute -DestinationPrefix '::/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -RouteMetric {r.RouteMetric} -Confirm:$false -ErrorAction SilentlyContinue }};");
+            }
             sb.Append("exit 0");
             Ps(sb.ToString());
-            File.Delete(StatePath);
+
+            // اگر هیچ مسیر پیش‌فرض فیزیکی برنگشت (مثلاً InterfaceIndex عوض شده یا ویندوز مسیر نساخته)،
+            // آداپتور را ری‌استارت می‌کنیم تا DHCP مسیرها را دوباره بسازد.
+            bool ok = state is not { V4.Count: > 0 } || HasPhysicalDefault();
+            if (!ok && state != null)
+            {
+                RestartAdapter(state.V4[0].InterfaceAlias);
+                ok = HasPhysicalDefault();
+            }
+
+            if (File.Exists(StatePath)) File.Delete(StatePath);
+            return ok;
         }
-        catch when (silent) { }
+        catch (Exception) when (silent) { return false; }
+    }
+
+    /// <summary>آیا حداقل یک مسیر پیش‌فرض فیزیکی (غیر از TUN) وجود دارد؟</summary>
+    public static bool HasPhysicalDefault()
+    {
+        try
+        {
+            string o = Ps("$c = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -notlike 'v2-tun*' }).Count; $c; exit 0");
+            return o.Trim() != "0";
+        }
+        catch { return true; }
+    }
+
+    private static void RestartAdapter(string? alias)
+    {
+        if (string.IsNullOrWhiteSpace(alias)) return;
+        try
+        {
+            Ps($"Restart-NetAdapter -Name '{alias}' -Confirm:$false -ErrorAction SilentlyContinue; exit 0");
+            System.Threading.Thread.Sleep(2000);
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// اگر ویندوز بعد از تغییر شبکه مسیرهای پیش‌فرض فیزیکی را برگردانده باشد، دوباره حذفشان می‌کند
+    /// و به اسنپ‌شات اضافه می‌کند تا Disconnect نهایی همه را برگرداند.
+    /// خروجی true یعنی شبکه تغییر کرده و قفل دوباره اعمال شده است.
+    /// </summary>
+    public static bool RefreshLock()
+    {
+        if (!File.Exists(StatePath)) return false;
+
+        SavedState? state;
+        try { state = System.Text.Json.JsonSerializer.Deserialize<SavedState>(File.ReadAllText(StatePath)); }
+        catch { return false; }
+        if (state == null) return false;
+
+        string json = Ps(@"
+$v4 = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '0.0.0.0' -and $_.InterfaceAlias -notlike 'v2-tun*' } | Select-Object NextHop,InterfaceIndex,RouteMetric,InterfaceAlias)
+$v6 = @(Get-NetRoute -DestinationPrefix '::/0' -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '::' -and $_.InterfaceAlias -notlike 'v2-tun*' } | Select-Object NextHop,InterfaceIndex,RouteMetric,InterfaceAlias)
+[pscustomobject]@{ v4 = $v4; v6 = $v6 } | ConvertTo-Json -Depth 5 -Compress
+");
+
+        List<SavedRoute> v4, v6;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            v4 = ParseRoutes(doc.RootElement.GetProperty("v4"));
+            v6 = ParseRoutes(doc.RootElement.GetProperty("v6"));
+        }
+        catch { return false; }
+
+        if (v4.Count == 0 && v6.Count == 0) return false;
+
+        try
+        {
+            var cmd = new System.Text.StringBuilder("$ErrorActionPreference='Continue'; ");
+            foreach (var r in v4)
+                cmd.Append($"Remove-NetRoute -DestinationPrefix '0.0.0.0/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -Confirm:$false -ErrorAction SilentlyContinue; ");
+            foreach (var r in v6)
+                cmd.Append($"Remove-NetRoute -DestinationPrefix '::/0' -NextHop '{r.NextHop}' -InterfaceIndex {r.InterfaceIndex} -Confirm:$false -ErrorAction SilentlyContinue; ");
+            cmd.Append("exit 0");
+            Ps(cmd.ToString());
+
+            var merged = new SavedState(
+                state.V4.Concat(v4).Distinct().ToList(),
+                state.V6.Concat(v6).Distinct().ToList(),
+                state.ServerIp, state.BootstrapIp);
+            File.WriteAllText(StatePath, System.Text.Json.JsonSerializer.Serialize(merged));
+            return true;
+        }
+        catch { return false; }
     }
 
     private static List<SavedRoute> SnapshotV4()

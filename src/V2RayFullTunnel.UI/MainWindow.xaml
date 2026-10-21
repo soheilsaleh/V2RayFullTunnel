@@ -179,8 +179,13 @@
               <DropShadowEffect BlurRadius="16" ShadowDepth="2" Direction="270" Color="#18000000" Opacity="0.6" RenderingBias="Performance"/>
             </Border.Effect>
             <DockPanel>
-              <TextBlock DockPanel.Dock="Top" Text="Log" FontWeight="SemiBold" FontSize="12"
-                         Foreground="#7E8A9A" Margin="0,0,0,8"/>
+              <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
+                <TextBlock Text="Log" FontWeight="SemiBold" FontSize="12"
+                           Foreground="#7E8A9A" VerticalAlignment="Center"/>
+                <Button x:Name="ClearLogBtn" Content="Clear" HorizontalAlignment="Right"
+                        Height="22" Padding="10,0" FontSize="11" Click="OnClearLog"
+                        Background="#232B38" Foreground="#9FB0C3" Style="{StaticResource FlatButton}"/>
+              </Grid>
               <TextBox x:Name="LogBox" IsReadOnly="True" Background="Transparent" Foreground="#C9D3DF"
                        BorderThickness="0" FontFamily="Cascadia Mono, Consolas" FontSize="12"
                        VerticalScrollBarVisibility="Auto" TextWrapping="NoWrap" CaretBrush="Transparent"/>

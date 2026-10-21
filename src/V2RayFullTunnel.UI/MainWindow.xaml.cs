@@ -457,8 +457,8 @@ public partial class MainWindow : Window
         }
         foreach (var line in batch) LogBox.AppendText(line + "\n");
         _logLines += batch.Length;
-        // برای جلوگیری از کند شدن تدریجی، متن لاگ را هر چند هزار خط نصف می‌کنیم
-        if (_logLines > 2500)
+        // برای جلوگیری از کند شدن تدریجی، متن لاگ را هر چند صد خط نصف می‌کنیم
+        if (_logLines > 800)
         {
             string text = LogBox.Text;
             int cut = text.IndexOf('\n', text.Length / 2);
@@ -466,6 +466,13 @@ public partial class MainWindow : Window
             _logLines = LogBox.LineCount;
         }
         LogBox.ScrollToEnd();
+    }
+
+    private void OnClearLog(object sender, RoutedEventArgs e)
+    {
+        LogBox.Clear();
+        lock (_logLock) _logQueue.Clear();
+        _logLines = 0;
     }
 
     private void Warn(string message, bool showDialog = true)

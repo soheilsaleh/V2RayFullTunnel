@@ -99,7 +99,11 @@ public static class SingBoxConfigBuilder
             {
                 ["tag"] = "direct-dns",
                 ["type"] = "udp",
-                ["server"] = "223.5.5.5"
+                ["server"] = "223.5.5.5",
+                // مهم: DNS نباید به auto-detect اینترفیس تکیه کند؛ چون KillSwitch مسیرهای
+                // پیش‌فرض فیزیکی را حذف می‌کند و هسته «default interface» پیدا نمی‌کند
+                // (خطای no route to internet). با detour، از outbound مستقیمِ bind شده استفاده می‌شود.
+                ["detour"] = "direct"
             }
         },
         ["rules"] = new JsonArray(),
@@ -107,20 +111,27 @@ public static class SingBoxConfigBuilder
         ["final"] = "direct-dns"
     };
 
-    private static JsonObject BuildRoute(ProxyLink link) => new()
+    private static JsonObject BuildRoute(ProxyLink link, string? bindInterface)
     {
-        ["auto_detect_interface"] = true,
-        ["default_domain_resolver"] = new JsonObject { ["server"] = "direct-dns" },
-        ["rules"] = new JsonArray
+        var route = new JsonObject
         {
-            new JsonObject { ["protocol"] = "dns", ["action"] = "hijack-dns" },
-            // DNS بوت‌استرپ مستقیم می‌رود تا هسته بتواند سرور را رزولو کند
-            new JsonObject { ["ip_cidr"] = new JsonArray { "223.5.5.5/32" }, ["outbound"] = "direct" },
-            // اتصال خود هسته به سرور نباید وارد تونل شود (جلوگیری از loop)
-            new JsonObject { ["domain"] = new JsonArray { link.Address }, ["outbound"] = "direct" }
-        },
-        ["final"] = "proxy"
-    };
+            ["default_domain_resolver"] = new JsonObject { ["server"] = "direct-dns" },
+            ["rules"] = new JsonArray
+            {
+                new JsonObject { ["protocol"] = "dns", ["action"] = "hijack-dns" },
+                // DNS بوت‌استرپ مستقیم می‌رود تا هسته بتواند سرور را رزولو کند
+                new JsonObject { ["ip_cidr"] = new JsonArray { "223.5.5.5/32" }, ["outbound"] = "direct" },
+                // اتصال خود هسته به سرور نباید وارد تونل شود (جلوگیری از loop)
+                new JsonObject { ["domain"] = new JsonArray { link.Address }, ["outbound"] = "direct" }
+            },
+            ["final"] = "proxy"
+        };
+        if (!string.IsNullOrEmpty(bindInterface))
+            route["default_interface"] = bindInterface;  // جایگزین auto_detect_interface
+        else
+            route["auto_detect_interface"] = true;
+        return route;
+    }
 
     private static string Serialize(JsonObject config) =>
         System.Text.Json.JsonSerializer.Serialize(config,
@@ -129,7 +140,7 @@ public static class SingBoxConfigBuilder
     /// <param name="bindInterface">نام دقیق اینترفیس فیزیکی (از KillSwitch.GetGatewayTo)؛ حیاتی برای KillSwitch مسیری.</param>
     public static string Build(ProxyLink link, string? bindInterface) => Serialize(new JsonObject
     {
-        ["log"] = new JsonObject { ["level"] = "info" },
+        ["log"] = new JsonObject { ["level"] = "warn" },
         ["dns"] = BuildDns(),
         ["inbounds"] = new JsonArray
         {
@@ -152,7 +163,7 @@ public static class SingBoxConfigBuilder
             }
         },
         ["outbounds"] = BuildOutbounds(BuildProxyOutbound(link, bindInterface), bindInterface),
-        ["route"] = BuildRoute(link)
+        ["route"] = BuildRoute(link, bindInterface)
     });
 
     /// <summary>
@@ -174,6 +185,6 @@ public static class SingBoxConfigBuilder
             }
         },
         ["outbounds"] = BuildOutbounds(BuildProxyOutbound(link, bindInterface), bindInterface),
-        ["route"] = BuildRoute(link)
+        ["route"] = BuildRoute(link, bindInterface)
     });
 }
