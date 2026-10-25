@@ -74,16 +74,22 @@ public sealed class ProfileStore
         try
         {
             var p = LinkParser.Parse(link);
-            return $"{p.Protocol.ToString().ToUpperInvariant()} • {p.Address}:{p.Port} • {p.Remark}".Trim();
+            string text = $"{p.Protocol.ToString().ToUpperInvariant()} • {p.Address}:{p.Port}";
+            return string.IsNullOrWhiteSpace(p.Remark) ? text : text + " • " + p.Remark;
         }
-        catch { return "لینک نامعتبر"; }
+        catch { return "Invalid link"; }
     }
 
-    public void Add(string name, string link)
+    /// <summary>پروفایل جدید اضافه می‌کند و همان پروفایل را برمی‌گرداند تا UI بتواند آن را انتخاب کند.</summary>
+    public SavedProfile Add(string name, string link)
     {
         string clean = (link ?? "").Trim();
-        if (clean.Length == 0) throw new ArgumentException("لینک خالی است.");
-        _items.RemoveAll(p => p.Link == clean); // بدون تکرار
+        if (clean.Length == 0) throw new ArgumentException("The link is empty.");
+
+        // اگر همین لینک از قبل وجود دارد، جای آن را می‌گیریم (بدون تکرار).
+        bool replaceDefault = _items.Any(p => p.Link == clean && p.Id == DefaultId);
+        _items.RemoveAll(p => p.Link == clean);
+
         var profile = new SavedProfile
         {
             Name = (name ?? "").Trim(),
@@ -92,9 +98,11 @@ public sealed class ProfileStore
         };
         if (string.IsNullOrWhiteSpace(profile.Name)) profile.Name = profile.Details;
         _items.Add(profile);
-        if (DefaultId == "") DefaultId = profile.Id;
+        if (replaceDefault || DefaultId == "") DefaultId = profile.Id;
+
         Save();
         SaveDefault();
+        return profile;
     }
 
     public void SetDefault(string id)
@@ -105,24 +113,39 @@ public sealed class ProfileStore
         Save();
     }
 
-    public void Remove(string id)
-    {
-        if (_items.RemoveAll(p => p.Id == id) > 0) Save();
-    }
+    public void Remove(string id) => Delete(id);
 
-    public void Delete(string id) => Remove(id);
+    public void Delete(string id)
+    {
+        if (_items.RemoveAll(p => p.Id == id) == 0) return;
+
+        if (DefaultId == id)
+        {
+            DefaultId = _items.FirstOrDefault()?.Id ?? "";
+            SaveDefault();
+        }
+        Save();
+    }
 
     public void Update(string id, string name, string link)
     {
         var p = _items.FirstOrDefault(x => x.Id == id)
             ?? throw new InvalidOperationException("Profile not found.");
         string clean = (link ?? "").Trim();
-        if (clean.Length == 0) throw new ArgumentException("Link is empty.");
+        if (clean.Length == 0) throw new ArgumentException("The link is empty.");
+
+        // پرونده دیگری با همین لینک داریم؟ جای آن را می‌گیریم تا لینک تکراری نماند.
+        bool replaceDefault = _items.Any(x => x.Id != id && x.Link == clean && x.Id == DefaultId);
+        _items.RemoveAll(x => x.Id != id && x.Link == clean);
+
         p.Link = clean;
         p.Details = Describe(clean);
         p.Name = (name ?? "").Trim();
         if (string.IsNullOrWhiteSpace(p.Name)) p.Name = p.Details;
+        if (replaceDefault) DefaultId = p.Id;
+
         Save();
+        SaveDefault();
     }
 
     public bool Rename(string id, string name)

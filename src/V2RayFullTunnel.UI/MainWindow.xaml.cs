@@ -9,6 +9,7 @@ using SystemIcons = System.Drawing.SystemIcons;
 using Application = System.Windows.Application;
 using MessageBox = System.Windows.MessageBox;
 using Color = System.Windows.Media.Color;
+using Brush = System.Windows.Media.Brush;
 using Key = System.Windows.Input.Key;
 using V2RayFullTunnel.Common;
 using V2RayFullTunnel.Core;
@@ -23,8 +24,9 @@ public partial class MainWindow : Window
     private Forms.ToolStripMenuItem? _trayConnect;
     private Forms.ToolStripMenuItem? _trayDisconnect;
     private System.Drawing.Icon? _iconOff, _iconOn, _iconBusy, _iconError;
-    private bool _syncingProfileList;
-    private bool _updatingProfile;
+    private bool _suppressSelection;
+    private bool _loadingForm;
+    private string? _editingId;
     private bool _reallyExit;
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -184,9 +186,16 @@ public partial class MainWindow : Window
 
     private void ResolveLinkFromProfiles()
     {
-        if (IsLinkValid() || string.IsNullOrEmpty(_store.DefaultId)) return;
-        var def = _store.Profiles.FirstOrDefault(p => p.Id == _store.DefaultId);
-        if (def != null) LinkBox.Text = def.Link;
+        if (IsLinkValid()) return;
+        var def = FindProfile(_store.DefaultId) ?? _store.Profiles.FirstOrDefault();
+        if (def == null) return;
+
+        _suppressSelection = true;
+        ProfileList.SelectedItem = ListItem(def.Id);
+        _suppressSelection = false;
+
+        LoadProfileIntoForm(def);
+        UpdateProfileButtons();
     }
 
     private void Balloon(string title, string text, Forms.ToolTipIcon icon) =>
@@ -196,62 +205,133 @@ public partial class MainWindow : Window
 
     private SavedProfile? Selected => ProfileList.SelectedItem as SavedProfile;
 
+    private SavedProfile? FindProfile(string? id) =>
+        string.IsNullOrEmpty(id) ? null : _store.Profiles.FirstOrDefault(p => p.Id == id);
+
+    private SavedProfile? ListItem(string? id) =>
+        string.IsNullOrEmpty(id) ? null : ProfileList.Items.OfType<SavedProfile>().FirstOrDefault(p => p.Id == id);
+
     private void RefreshProfiles(string? selectId = null)
     {
         _store.Refresh();
-        _syncingProfileList = true;
-        ProfileList.ItemsSource = _store.Profiles.ToList();
-        if (ProfileList.Items.Count == 0)
+        var items = _store.Profiles.ToList();
+
+        _suppressSelection = true;
+        ProfileList.ItemsSource = items;
+        ProfileList.SelectedItem = items.FirstOrDefault(p => p.Id == selectId);
+        _suppressSelection = false;
+
+        ProfileCount.Text = items.Count switch
         {
-            _syncingProfileList = false;
-            SetEditingMode(false);
-            LinkBox.Text = "";
-            return;
+            0 => "none",
+            1 => "1 profile",
+            _ => $"{items.Count} profiles"
+        };
+        EmptyHint.Visibility = items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        if (ProfileList.SelectedItem is SavedProfile p)
+            LoadProfileIntoForm(p);
+        else
+            BeginNewProfile(clear: true);
+
+        UpdateProfileButtons();
+    }
+
+    private void LoadProfileIntoForm(SavedProfile p)
+    {
+        _editingId = p.Id;
+
+        _loadingForm = true;
+        NameBox.Text = p.Name;
+        LinkBox.Text = p.Link;
+        _loadingForm = false;
+
+        FormTitle.Text = "Edit profile";
+        FormSub.Text = $"Editing \"{p.Name}\".";
+        RevertBtn.Visibility = Visibility.Visible;
+        UpdateLinkState();
+    }
+
+    private void BeginNewProfile(bool clear)
+    {
+        _editingId = null;
+
+        if (clear)
+        {
+            _loadingForm = true;
+            NameBox.Clear();
+            LinkBox.Clear();
+            _loadingForm = false;
         }
-        int index = 0;
-        if (!string.IsNullOrEmpty(selectId))
-            for (int i = 0; i < ProfileList.Items.Count; i++)
-                if (((SavedProfile)ProfileList.Items[i]).Id == selectId) { index = i; break; }
-        _syncingProfileList = false;
-        ProfileList.SelectedIndex = index;
+
+        FormTitle.Text = "New profile";
+        FormSub.Text = "Paste a link, then click Add profile.";
+        RevertBtn.Visibility = Visibility.Collapsed;
+        UpdateLinkState();
+    }
+
+    private void OnNewProfile(object sender, RoutedEventArgs e)
+    {
+        if (FormHasDraft() && !ConfirmDiscard()) return;
+
+        _suppressSelection = true;
+        ProfileList.SelectedItem = null;
+        _suppressSelection = false;
+
+        BeginNewProfile(clear: true);
+        UpdateProfileButtons();
+        LinkBox.Focus();
     }
 
     private void OnSaveProfile(object sender, RoutedEventArgs e)
     {
         string link = LinkBox.Text.Trim();
-        if (link.Length == 0) { Warn(DescribeInvalid()); return; }
+        if (!IsLinkValid())
+        {
+            FormHint.Foreground = (Brush)FindResource("B.Danger");
+            FormHint.Text = link.Length == 0
+                ? "Paste a link first: vless://, vmess:// or trojan://"
+                : "Not a valid proxy link. Check the link and try again.";
+            return;
+        }
+
         try
         {
-            _store.Add(NameBox.Text, link);
-            string id = _store.Profiles[^1].Id;
-            NameBox.Clear();
-            SetEditingMode(false);
-            RefreshProfiles(id);
-            Log($"Saved: {ProfileStore.Describe(link)}");
+            if (_editingId != null)
+            {
+                _store.Update(_editingId, NameBox.Text, link);
+                Log($"Profile updated: {ProfileStore.Describe(link)}");
+                RefreshProfiles(_editingId);
+            }
+            else
+            {
+                var added = _store.Add(NameBox.Text, link);
+                Log($"Profile added: {ProfileStore.Describe(link)}");
+                RefreshProfiles(added.Id);
+            }
         }
         catch (Exception ex) { Warn(ex.Message); }
     }
 
-    private void OnUpdateProfile(object sender, RoutedEventArgs e)
+    private void OnRevertProfile(object sender, RoutedEventArgs e)
     {
-        var p = Selected;
-        if (p == null) return;
-        string link = LinkBox.Text.Trim();
-        if (link.Length == 0) { Warn(DescribeInvalid()); return; }
-        try
+        var p = FindProfile(_editingId);
+        if (p == null)
         {
-            _store.Update(p.Id, NameBox.Text, link);
-            SetEditingMode(false);
-            RefreshProfiles(p.Id);
-            Log($"Updated: {ProfileStore.Describe(link)}");
+            BeginNewProfile(clear: true);
+            UpdateProfileButtons();
+            return;
         }
-        catch (Exception ex) { Warn(ex.Message); }
+        LoadProfileIntoForm(p);
+        UpdateProfileButtons();
     }
 
     private void OnSetDefault(object sender, RoutedEventArgs e)
     {
         var p = Selected;
         if (p == null) return;
+        if (FormHasDraft() && !ConfirmDiscard()) return;
+
         _store.SetDefault(p.Id);
         RefreshProfiles(p.Id);
         Log(_store.DefaultId == p.Id ? $"Default profile: {p.Name}" : "Default cleared.");
@@ -263,42 +343,72 @@ public partial class MainWindow : Window
         if (p == null) return;
         if (MessageBox.Show($"Delete \"{p.Name}\"?", "Delete profile",
                 MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+
         _store.Delete(p.Id);
-        RefreshProfiles(StartupSelection());
-        Log($"Deleted: {p.Name}");
+        Log($"Profile deleted: {p.Name}");
+
+        string? next = _store.DefaultId;
+        if (FindProfile(next) == null) next = _store.Profiles.FirstOrDefault()?.Id;
+        RefreshProfiles(next);
     }
 
     private void OnProfileSelected(object sender, SelectionChangedEventArgs e)
     {
-        if (_syncingProfileList) return;
+        if (_suppressSelection) return;
+
         var p = Selected;
-        if (p == null) { SetEditingMode(false); return; }
-        _updatingProfile = true;
-        LinkBox.Text = p.Link;
-        NameBox.Text = p.Name;
-        _updatingProfile = false;
-        SetEditingMode(true);
+        if (p == null) return;
+
+        if (p.Id != _editingId && FormHasDraft())
+        {
+            if (!ConfirmDiscard())
+            {
+                _suppressSelection = true;
+                ProfileList.SelectedItem = ListItem(_editingId);
+                _suppressSelection = false;
+                UpdateProfileButtons();
+                return;
+            }
+        }
+
+        LoadProfileIntoForm(p);
+        UpdateProfileButtons();
         Log($"Selected: {p.Display}");
     }
 
-    private void SetEditingMode(bool editing)
+    private void UpdateProfileButtons()
     {
-        EditBtn.IsEnabled = editing;
-        DeleteBtn.IsEnabled = editing;
-        DefaultBtn.IsEnabled = editing;
-        DefaultBtn.Content = Selected is { IsDefault: true } ? "Default ✓" : "Default";
-        SaveBtn.IsEnabled = !editing;
-        LinkLabel.Text = editing
-            ? "Editing selected profile - change link or name, then press Update"
-            : "Profile link - paste a new VLESS / VMess / Trojan link here";
+        bool has = Selected != null;
+        DefaultBtn.IsEnabled = has;
+        DeleteBtn.IsEnabled = has;
+
+        bool isDefault = Selected is { IsDefault: true };
+        DefaultBtn.Content = isDefault ? "Default \u2713" : "Set default";
+        DefaultBtn.ToolTip = isDefault ? "Click to clear the default profile" : "Use this profile by default";
+
+        SaveBtn.Content = _editingId != null ? "Save changes" : "Add profile";
     }
+
+    private bool FormHasDraft()
+    {
+        string link = LinkBox.Text.Trim();
+        string name = NameBox.Text.Trim();
+        var p = FindProfile(_editingId);
+        if (p == null)
+            return link.Length > 0 || name.Length > 0;
+
+        return !string.Equals(p.Link, link, StringComparison.Ordinal)
+            || !string.Equals(p.Name ?? "", name, StringComparison.Ordinal);
+    }
+
+    private static bool ConfirmDiscard() =>
+        MessageBox.Show("You have unsaved changes. Discard them?", "Unsaved changes",
+            MessageBoxButton.OKCancel, MessageBoxImage.Question) == MessageBoxResult.OK;
 
     private void OnLinkChanged(object sender, TextChangedEventArgs e)
     {
-        if (_updatingProfile) return;
-        ConnectBtn.IsEnabled = IsLinkValid() && _tunnel.State != TunnelState.Connected;
-        TestBtn.IsEnabled = IsLinkValid() && _tunnel.State != TunnelState.Connected;
-        ConnectBtn.Opacity = IsLinkValid() ? 1.0 : 0.45;
+        if (_loadingForm) return;
+        UpdateLinkState();
     }
 
     private void OnNameChanged(object sender, TextChangedEventArgs e) { }
@@ -306,13 +416,18 @@ public partial class MainWindow : Window
     private void OnNameKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         if (e.Key != Key.Enter) return;
-        if (EditBtn.IsEnabled) OnUpdateProfile(sender, e);
-        else OnSaveProfile(sender, e);
+        e.Handled = true;
+        OnSaveProfile(sender, e);
     }
 
-    private static string DescribeInvalid() =>
-        "The link box is empty or not a valid link.\n" +
-        "Expected a link starting with vless://, vmess:// or trojan://";
+    private void OnLinkKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        // Ctrl+Enter saves without leaving the link box.
+        if (e.Key != Key.Enter ||
+            (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) == 0) return;
+        e.Handled = true;
+        OnSaveProfile(sender, e);
+    }
 
     // ---------- Tunnel actions ----------
 
@@ -386,15 +501,51 @@ public partial class MainWindow : Window
     private void SetBusy(bool busy)
     {
         BusyBar.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
-        ConnectBtn.IsEnabled = !busy && _tunnel.State != TunnelState.Connected && IsLinkValid();
         DisconnectBtn.IsEnabled = !busy && _tunnel.State == TunnelState.Connected;
-        TestBtn.IsEnabled = !busy && _tunnel.State != TunnelState.Connected && IsLinkValid();
         CheckIpBtn.IsEnabled = !busy;
+        UpdateLinkState();
+        if (busy)
+        {
+            ConnectBtn.IsEnabled = false;
+            TestBtn.IsEnabled = false;
+            SaveBtn.IsEnabled = false;
+        }
     }
 
     private bool IsLinkValid()
     {
-        try { LinkParser.Parse(LinkBox.Text); return true; } catch { return false; }
+        string text = LinkBox.Text.Trim();
+        if (text.Length == 0) return false;
+        try { LinkParser.Parse(text); return true; } catch { return false; }
+    }
+
+    private void UpdateLinkState()
+    {
+        string raw = LinkBox.Text.Trim();
+        bool valid = IsLinkValid();
+        bool canStart = valid && _tunnel.State is not (TunnelState.Connected or TunnelState.Connecting);
+
+        ConnectBtn.IsEnabled = canStart;
+        TestBtn.IsEnabled = canStart;
+        ConnectBtn.Opacity = valid ? 1.0 : 0.45;
+        TestBtn.Opacity = valid ? 1.0 : 0.45;
+        SaveBtn.IsEnabled = valid;
+
+        if (raw.Length == 0)
+        {
+            FormHint.Foreground = (Brush)FindResource("B.Faint");
+            FormHint.Text = "Accepted: vless://, vmess:// and trojan:// links.";
+        }
+        else if (!valid)
+        {
+            FormHint.Foreground = (Brush)FindResource("B.Danger");
+            FormHint.Text = "Not a valid proxy link. It must start with vless://, vmess:// or trojan://.";
+        }
+        else
+        {
+            FormHint.Foreground = (Brush)FindResource("B.Success");
+            FormHint.Text = "Valid \u2022 " + ProfileStore.Describe(raw);
+        }
     }
 
     private void ApplyState(TunnelState state, string message)
@@ -412,9 +563,10 @@ public partial class MainWindow : Window
         StatusSub.Text = state == TunnelState.Connected
             ? "KillSwitch is on: while the tunnel is down, no traffic can leave directly."
             : "Select a saved profile and press Connect.";
-        ConnectBtn.IsEnabled = state != TunnelState.Connected && IsLinkValid();
-        TestBtn.IsEnabled = state != TunnelState.Connected && IsLinkValid();
+
         DisconnectBtn.IsEnabled = state == TunnelState.Connected;
+        UpdateLinkState();
+
         if (_tray != null)
         {
             _tray.Icon = state switch

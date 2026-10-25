@@ -7,14 +7,24 @@ public static class LinkParser
 {
     public static ProxyLink Parse(string link)
     {
-        link = link.Trim();
-        if (link.StartsWith("vless://", StringComparison.OrdinalIgnoreCase))
-            return ParseVlessOrTrojan(link, ProxyProtocol.Vless);
-        if (link.StartsWith("trojan://", StringComparison.OrdinalIgnoreCase))
-            return ParseVlessOrTrojan(link, ProxyProtocol.Trojan);
-        if (link.StartsWith("vmess://", StringComparison.OrdinalIgnoreCase))
-            return ParseVmess(link);
-        throw new ArgumentException("لینک باید با vless:// یا vmess:// یا trojan:// شروع شود.");
+        link = (link ?? "").Trim();
+        if (link.Length == 0)
+            throw new ArgumentException("The link is empty.");
+        try
+        {
+            if (link.StartsWith("vless://", StringComparison.OrdinalIgnoreCase))
+                return ParseVlessOrTrojan(link, ProxyProtocol.Vless);
+            if (link.StartsWith("trojan://", StringComparison.OrdinalIgnoreCase))
+                return ParseVlessOrTrojan(link, ProxyProtocol.Trojan);
+            if (link.StartsWith("vmess://", StringComparison.OrdinalIgnoreCase))
+                return ParseVmess(link);
+            throw new ArgumentException("The link must start with vless://, vmess:// or trojan://.");
+        }
+        catch (ArgumentException) { throw; }
+        catch (Exception ex)
+        {
+            throw new ArgumentException("The proxy link is not valid: " + ex.Message, ex);
+        }
     }
 
     private static ProxyLink ParseVlessOrTrojan(string link, ProxyProtocol proto)
@@ -23,6 +33,8 @@ public static class LinkParser
         string id = Uri.UnescapeDataString(uri.UserInfo);
         string host = uri.Host;
         int port = uri.Port;
+        if (string.IsNullOrWhiteSpace(host) || port is < 1 or > 65535)
+            throw new ArgumentException("The link has no valid host or port.");
         var q = ParseQuery(uri.Query);
         string remark = Uri.UnescapeDataString(uri.Fragment.TrimStart('#'));
         string sni = Get(q, "sni", Get(q, "serverName", host));
@@ -45,6 +57,8 @@ public static class LinkParser
         var r = doc.RootElement;
         string host = r.GetProperty("add").GetString() ?? "";
         int port = int.Parse(r.GetProperty("port").GetString() ?? "443");
+        if (string.IsNullOrWhiteSpace(host) || port is < 1 or > 65535)
+            throw new ArgumentException("The link has no valid host or port.");
         string id = r.GetProperty("id").GetString() ?? "";
         string remark = r.TryGetProperty("ps", out var ps) ? ps.GetString() ?? "" : "";
         string sni = r.TryGetProperty("sni", out var sniEl) ? sniEl.GetString() ?? host : host;

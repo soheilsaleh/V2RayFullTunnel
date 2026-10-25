@@ -1,8 +1,8 @@
 ﻿<Window x:Class="V2RayFullTunnel.UI.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="V2Ray Full Tunnel" Height="640" Width="920"
-        MinHeight="560" MinWidth="860"
+        Title="V2Ray Full Tunnel" Height="720" Width="1000"
+        MinHeight="620" MinWidth="920"
         FlowDirection="LeftToRight" WindowStartupLocation="CenterScreen"
         Background="{StaticResource B.AppBg}" WindowStyle="SingleBorderWindow"
         FontFamily="Segoe UI" FontSize="13"
@@ -56,85 +56,89 @@
 
       <Grid Grid.Row="1">
         <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="320"/>
+          <ColumnDefinition Width="300"/>
           <ColumnDefinition Width="14"/>
           <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
 
-        <!-- Profiles -->
+        <!-- Saved profiles -->
         <Border Grid.Column="0" Style="{StaticResource Card}">
           <Border.Effect>
             <DropShadowEffect BlurRadius="16" ShadowDepth="2" Direction="270" Color="#14000000" Opacity="0.6" RenderingBias="Performance"/>
           </Border.Effect>
           <DockPanel>
-            <TextBlock DockPanel.Dock="Top" Text="Saved profiles" FontWeight="SemiBold" FontSize="14"
-                       Foreground="{StaticResource B.Text}" Margin="0,0,0,12"/>
+            <Grid DockPanel.Dock="Top" Margin="0,0,0,12">
+              <TextBlock Text="Saved profiles" FontWeight="SemiBold" FontSize="14"
+                         Foreground="{StaticResource B.Text}" VerticalAlignment="Center"/>
+              <TextBlock x:Name="ProfileCount" HorizontalAlignment="Right" VerticalAlignment="Center"
+                         Foreground="{StaticResource B.Faint}" FontSize="11"/>
+            </Grid>
 
-            <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
-              <TextBox x:Name="NameBox" Height="36" Style="{StaticResource InputBox}"
-                       TextChanged="OnNameChanged" KeyDown="OnNameKeyDown"
-                       ToolTip="Optional name for this profile"/>
-              <Grid Margin="0,10,0,0">
-                <Grid.ColumnDefinitions>
-                  <ColumnDefinition Width="*"/>
-                  <ColumnDefinition Width="6"/>
-                  <ColumnDefinition Width="*"/>
-                  <ColumnDefinition Width="6"/>
-                  <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <Button Grid.Column="0" x:Name="SaveBtn" Content="Save" Height="36" Click="OnSaveProfile"
-                        Background="{StaticResource B.Accent}" Foreground="White"
-                        Style="{StaticResource FlatButton}"/>
-                <Button Grid.Column="2" x:Name="EditBtn" Content="Update" Height="36" Click="OnUpdateProfile"
-                        Background="#EEF1F5" Foreground="{StaticResource B.Text}"
-                        IsEnabled="False" Style="{StaticResource FlatButton}"/>
-                <Button Grid.Column="4" x:Name="DefaultBtn" Content="Default" Height="36" Click="OnSetDefault"
-                        Background="{StaticResource B.AccentSoft}" Foreground="#1B4FA8"
-                        IsEnabled="False" Style="{StaticResource FlatButton}"/>
-              </Grid>
-              <Button x:Name="DeleteBtn" Content="Delete selected" Height="36" Margin="0,8,0,0"
+            <Button x:Name="NewBtn" DockPanel.Dock="Top" Content="+  New profile" Height="36"
+                    Margin="0,0,0,10" Click="OnNewProfile"
+                    Background="{StaticResource B.Accent}" Foreground="White"
+                    ToolTip="Start a new profile form" Style="{StaticResource FlatButton}"/>
+
+            <Grid DockPanel.Dock="Bottom" Margin="0,12,0,0">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Button Grid.Column="0" x:Name="DefaultBtn" Content="Set default" Height="36" Click="OnSetDefault"
+                      Background="{StaticResource B.AccentSoft}" Foreground="#1B4FA8"
+                      IsEnabled="False" Style="{StaticResource FlatButton}"/>
+              <Button Grid.Column="2" x:Name="DeleteBtn" Content="Delete" Height="36"
                       Click="OnDeleteProfile" Background="#FDECEA" Foreground="#B3261E"
                       IsEnabled="False" Style="{StaticResource FlatButton}"/>
-            </StackPanel>
+            </Grid>
 
-            <ListBox x:Name="ProfileList" SelectionChanged="OnProfileSelected" BorderThickness="0"
-                     Background="Transparent" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-              <ListBox.ItemContainerStyle>
-                <Style TargetType="ListBoxItem">
-                  <Setter Property="Padding" Value="10,8"/>
-                  <Setter Property="Margin" Value="0,0,0,4"/>
-                  <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-                  <Setter Property="Template">
-                    <Setter.Value>
-                      <ControlTemplate TargetType="ListBoxItem">
-                        <Border x:Name="Bd" Background="Transparent" CornerRadius="9"
-                                Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
-                          <ContentPresenter/>
-                        </Border>
-                        <ControlTemplate.Triggers>
-                          <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="#F2F5F9"/>
-                          </Trigger>
-                          <Trigger Property="IsSelected" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="{StaticResource B.AccentSoft}"/>
-                          </Trigger>
-                        </ControlTemplate.Triggers>
-                      </ControlTemplate>
-                    </Setter.Value>
-                  </Setter>
-                </Style>
-              </ListBox.ItemContainerStyle>
-              <ListBox.ItemTemplate>
-                <DataTemplate>
-                  <StackPanel>
-                    <TextBlock Text="{Binding Display}" FontWeight="SemiBold" TextWrapping="Wrap"
-                               Foreground="{StaticResource B.Text}"/>
-                    <TextBlock Text="{Binding Details}" FontSize="11" Foreground="{StaticResource B.Faint}"
-                               TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
-                  </StackPanel>
-                </DataTemplate>
-              </ListBox.ItemTemplate>
-            </ListBox>
+            <Grid>
+              <ListBox x:Name="ProfileList" SelectionChanged="OnProfileSelected" BorderThickness="0"
+                       Background="Transparent" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                <ListBox.ItemContainerStyle>
+                  <Style TargetType="ListBoxItem">
+                    <Setter Property="Padding" Value="10,8"/>
+                    <Setter Property="Margin" Value="0,0,0,4"/>
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                    <Setter Property="Template">
+                      <Setter.Value>
+                        <ControlTemplate TargetType="ListBoxItem">
+                          <Border x:Name="Bd" Background="Transparent" CornerRadius="9"
+                                  Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+                            <ContentPresenter/>
+                          </Border>
+                          <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                              <Setter TargetName="Bd" Property="Background" Value="#F2F5F9"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                              <Setter TargetName="Bd" Property="Background" Value="{StaticResource B.AccentSoft}"/>
+                            </Trigger>
+                          </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                      </Setter.Value>
+                    </Setter>
+                  </Style>
+                </ListBox.ItemContainerStyle>
+                <ListBox.ItemTemplate>
+                  <DataTemplate>
+                    <StackPanel>
+                      <TextBlock Text="{Binding Display}" FontWeight="SemiBold" TextWrapping="Wrap"
+                                 Foreground="{StaticResource B.Text}"/>
+                      <TextBlock Text="{Binding Details}" FontSize="11" Foreground="{StaticResource B.Faint}"
+                                 TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                    </StackPanel>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+
+              <TextBlock x:Name="EmptyHint" Text="No profiles yet.&#10;Click New profile and paste a link."
+                         TextAlignment="Center" TextWrapping="Wrap" FontSize="12"
+                         Foreground="{StaticResource B.Faint}"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"
+                         IsHitTestVisible="False" Visibility="Collapsed"/>
+            </Grid>
           </DockPanel>
         </Border>
 
@@ -147,19 +151,56 @@
             <RowDefinition Height="*"/>
           </Grid.RowDefinitions>
 
+          <!-- Profile editor -->
           <Border Grid.Row="0" Style="{StaticResource Card}">
             <Border.Effect>
               <DropShadowEffect BlurRadius="16" ShadowDepth="2" Direction="270" Color="#14000000" Opacity="0.6" RenderingBias="Performance"/>
             </Border.Effect>
             <StackPanel>
-              <TextBlock x:Name="LinkLabel" Text="Profile link - paste a new VLESS / VMess / Trojan link here"
-                         Foreground="{StaticResource B.Muted}" FontSize="12" Margin="0,0,0,8"/>
+              <Grid Margin="0,0,0,12">
+                <StackPanel Margin="0,0,140,0">
+                  <TextBlock x:Name="FormTitle" Text="New profile" FontWeight="SemiBold" FontSize="14"
+                             Foreground="{StaticResource B.Text}" TextTrimming="CharacterEllipsis"/>
+                  <TextBlock x:Name="FormSub" Text="Paste a link, then click Add profile."
+                             Margin="0,2,0,0" FontSize="11" Foreground="{StaticResource B.Faint}"
+                             TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+                <Button x:Name="RevertBtn" Content="Discard changes" HorizontalAlignment="Right"
+                        VerticalAlignment="Top" Height="26" Padding="10,0" FontSize="11"
+                        Click="OnRevertProfile" Background="#EEF1F5" Foreground="{StaticResource B.Text}"
+                        Visibility="Collapsed" Style="{StaticResource FlatButton}"/>
+              </Grid>
+
+              <TextBlock Text="Name (optional)" FontSize="11" Foreground="{StaticResource B.Muted}"
+                         Margin="2,0,0,5"/>
+              <TextBox x:Name="NameBox" Height="36" Style="{StaticResource InputBox}"
+                       TextChanged="OnNameChanged" KeyDown="OnNameKeyDown"
+                       ToolTip="Optional name. If empty, the address is used."/>
+
+              <TextBlock Text="Proxy link" FontSize="11" Foreground="{StaticResource B.Muted}"
+                         Margin="2,10,0,5"/>
               <TextBox x:Name="LinkBox" Height="64" AcceptsReturn="True" TextWrapping="Wrap"
                        VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="12"
-                       Style="{StaticResource InputBox}" TextChanged="OnLinkChanged"/>
+                       Style="{StaticResource InputBox}" TextChanged="OnLinkChanged"
+                       KeyDown="OnLinkKeyDown"
+                       ToolTip="vless://, vmess:// or trojan://"/>
+
+              <Grid Margin="0,10,0,0">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="FormHint" Grid.Column="0" TextWrapping="Wrap" FontSize="11"
+                           VerticalAlignment="Center" Margin="2,0,14,0"
+                           Foreground="{StaticResource B.Faint}"/>
+                <Button Grid.Column="1" x:Name="SaveBtn" Content="Add profile" Width="136" Height="36"
+                        Click="OnSaveProfile" Background="{StaticResource B.Accent}" Foreground="White"
+                        Style="{StaticResource FlatButton}"/>
+              </Grid>
             </StackPanel>
           </Border>
 
+          <!-- Actions -->
           <UniformGrid Grid.Row="2" Columns="4">
             <Button x:Name="ConnectBtn" Content="Connect" Height="42" Margin="0,0,6,0" Click="OnConnect"
                     Background="{StaticResource B.Accent}" Foreground="White" Style="{StaticResource FlatButton}"/>
@@ -174,6 +215,7 @@
                     Background="#EEF1F5" Foreground="{StaticResource B.Text}" Style="{StaticResource FlatButton}"/>
           </UniformGrid>
 
+          <!-- Log -->
           <Border Grid.Row="4" Background="#161C26" CornerRadius="14" Padding="14">
             <Border.Effect>
               <DropShadowEffect BlurRadius="16" ShadowDepth="2" Direction="270" Color="#18000000" Opacity="0.6" RenderingBias="Performance"/>

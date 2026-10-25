@@ -12,6 +12,8 @@
     <SolidColorBrush x:Key="B.AccentSoft" Color="#E8F1FF"/>
     <SolidColorBrush x:Key="B.Border" Color="#DCE1E8"/>
     <SolidColorBrush x:Key="B.Surface" Color="#F5F7FA"/>
+    <SolidColorBrush x:Key="B.Danger" Color="#B3261E"/>
+    <SolidColorBrush x:Key="B.Success" Color="#2E9E5B"/>
 
     <!-- کارت سفید تمیز با گوشه‌های نرم -->
     <Style x:Key="Card" TargetType="Border">
